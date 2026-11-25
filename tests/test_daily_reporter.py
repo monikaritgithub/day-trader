@@ -1,5 +1,6 @@
 import unittest
 from trader.daily_reporter import build_daily_report_data, generate_email_html
+from trader.statement_pdf import generate_broker_statement_pdf
 
 class TestDailyReporter(unittest.TestCase):
     def test_build_daily_report_data(self):
@@ -55,6 +56,13 @@ class TestDailyReporter(unittest.TestCase):
         self.assertIn("204.50", html)
         self.assertIn("TSLA", html)
         self.assertIn("Tiger Brokers NZ", html)
+
+    def test_generate_broker_statement_pdf(self):
+        data = build_daily_report_data()
+        pdf = generate_broker_statement_pdf(data)
+        self.assertIsInstance(pdf, bytes)
+        self.assertGreater(len(pdf), 1000)
+        self.assertTrue(pdf.startswith(b"%PDF"))
 
 if __name__ == "__main__":
     unittest.main()

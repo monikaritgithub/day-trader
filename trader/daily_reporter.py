@@ -86,10 +86,17 @@ def build_daily_report_data() -> Dict[str, Any]:
     total_fees = round(sum(float(t.get("tiger_fee", 0.0)) for t in trades), 2)
     today_fees = round(sum(float(t.get("tiger_fee", 0.0)) for t in today_trades), 2)
 
-    # Calculate previous balance (balance before today's trades)
-    previous_balance = round(current_cash - today_realized_pnl + today_fees, 2)
-    if not today_trades:
-        previous_balance = current_cash
+    # Exact cash-flow reconciliation: cash changes only by +net_proceeds on SELL and -total_cost on BUY
+    today_buy_cost = sum(
+        float(t.get("cost") if t.get("cost") is not None else (float(t.get("shares", 0.0)) * float(t.get("price", 0.0)) + float(t.get("tiger_fee", 0.0))))
+        for t in today_trades if str(t.get("side", "")).upper() == "BUY"
+    )
+    today_sell_proceeds = sum(
+        float(t.get("proceeds") if t.get("proceeds") is not None else (float(t.get("shares", 0.0)) * float(t.get("price", 0.0)) - float(t.get("tiger_fee", 0.0))))
+        for t in closed_today
+    )
+    cash_delta_today = today_sell_proceeds - today_buy_cost
+    previous_balance = round(current_cash - cash_delta_today, 2) if today_trades else current_cash
 
     total_pnl_pct = round((total_realized_pnl / starting_cash) * 100, 2) if starting_cash > 0 else 0.0
     today_pnl_pct = round((today_realized_pnl / previous_balance) * 100, 2) if previous_balance > 0 else 0.0
@@ -279,7 +286,22 @@ def send_daily_market_close_report() -> Dict[str, Any]:
         }
     html_content = generate_email_html(data)
 
-    subject = f"Day Trader Daily Statement: {data['nz_date']} • Balance: ${data['current_balance']:,.2f} USD ({'+' if data['today_realized_pnl'] >= 0 else ''}${data['today_realized_pnl']:,.2f})"
+    # Generate institutional broker statement PDF attachment
+    pdf_filename = f"TigerBrokersNZ_Statement_{data['nz_date']}.pdf"
+    pdf_base64 = None
+    try:
+        import base64
+        from trader.statement_pdf import generate_broker_statement_pdf
+        pdf_bytes = generate_broker_statement_pdf(data)
+        pdf_base64 = base64.b64encode(pdf_bytes).decode("ascii")
+        # Persist statement locally
+        stmt_dir = TRADER_DIR / "statements"
+        stmt_dir.mkdir(parents=True, exist_ok=True)
+        (stmt_dir / pdf_filename).write_bytes(pdf_bytes)
+    except Exception as e:
+        print(f"Notice: PDF generation error: {e}")
+
+    subject = f"Tiger Brokers NZ Daily Statement: {data['nz_date']} • Balance: ${data['current_balance']:,.2f} USD ({'+' if data['today_realized_pnl'] >= 0 else ''}${data['today_realized_pnl']:,.2f})"
 
     payload = {
         "from": f"Day Trader <{from_email}>",
@@ -287,6 +309,13 @@ def send_daily_market_close_report() -> Dict[str, Any]:
         "subject": subject,
         "html": html_content
     }
+    if pdf_base64:
+        payload["attachments"] = [
+            {
+                "filename": pdf_filename,
+                "content": pdf_base64
+            }
+        ]
 
     url = "https://api.resend.com/emails"
     headers = {

@@ -12,6 +12,7 @@ import os
 import sys
 import time
 import datetime
+import zoneinfo
 import subprocess
 from pathlib import Path
 from typing import Set, Dict, Any, Optional, Tuple
@@ -203,7 +204,7 @@ def get_trades_summary() -> Dict[str, Any]:
 def get_full_state_snapshot() -> Dict[str, Any]:
     """Gather complete current state from disk."""
     config = read_json_safe(TRADER_DIR / "config.json") or {}
-    portfolio = read_json_safe(TRADER_DIR / "portfolio.json") or {"cash": config.get("budget", 100.0), "positions": []}
+    portfolio = read_json_safe(TRADER_DIR / "portfolio.json") or {"cash": config.get("budget", 200.0), "positions": []}
     watchlist = read_json_safe(TRADER_DIR / "watchlist.json") or {"hits": []}
     entry = read_json_safe(TRADER_DIR / "entry.json")
     plan = read_json_safe(TRADER_DIR / "plan.json")
@@ -258,9 +259,9 @@ def get_full_state_snapshot() -> Dict[str, Any]:
         "telemetry": {
             "cash": portfolio.get("cash", 0),
             "trades_today": trades_today,
-            "max_trades": config.get("max_trades_per_day", 3),
+            "max_trades": config.get("max_trades_per_day", 4),
             "risk_today": round(risk_today, 2),
-            "max_daily_loss": config.get("max_daily_loss_usd", 150),
+            "max_daily_loss": config.get("max_daily_loss_usd", 6.0),
             "open_positions_count": len(portfolio.get("positions", [])),
             "paper_mode": config.get("paper", True),
             "auto_scan_enabled": auto_scan_enabled
@@ -545,7 +546,7 @@ async def handle_get_news(request: web.Request) -> web.Response:
         if (now - cached_time) < NEWS_CACHE_TTL:
             return web.json_response({"success": True, "data": cached_data, "cached": True})
 
-    args = ["trader-news/news.py", "--tickers"] + sym_list + ["--hours", "24", "--json"]
+    args = ["trader-news/news.py", "--tickers"] + sym_list + ["--hours", "72", "--all", "--config", str(TRADER_DIR / "config.json"), "--json"]
     code, stdout, stderr = await run_cli_cmd(args, timeout=25.0)
     data = {}
     try:
@@ -558,7 +559,7 @@ async def handle_get_news(request: web.Request) -> web.Response:
     if not raw_items:
         # Fallback to live headlines via Google News RSS
         for sym in sym_list[:3]:
-            live_items = fetch_live_headlines(sym)
+            live_items = await asyncio.to_thread(fetch_live_headlines, sym)
             for it in live_items:
                 raw_items.append(it)
 
@@ -723,7 +724,7 @@ async def handle_post_demo_buy(request: web.Request) -> web.Response:
         stop_price=stop,
         target_price=target,
         min_net_profit_usd=min_net_profit,
-        conservative_regulatory=True,
+        conservative_regulatory=False,
     )
     if not econ.get("verified") or not econ.get("profitable"):
         return web.json_response({
@@ -773,8 +774,8 @@ async def handle_post_demo_buy(request: web.Request) -> web.Response:
     # Record fill to trade_history.json
     th_data = read_json_safe(TRADER_DIR / "trade_history.json") or {"trades": []}
     now_utc = datetime.datetime.now(datetime.timezone.utc)
-    nz_time = (now_utc + datetime.timedelta(hours=13)).strftime("%Y-%m-%d %I:%M:%S %p NZDT")
-    et_time = (now_utc - datetime.timedelta(hours=5)).strftime("%Y-%m-%d %I:%M:%S %p ET")
+    nz_time = now_utc.astimezone(zoneinfo.ZoneInfo("Pacific/Auckland")).strftime("%Y-%m-%d %I:%M:%S %p NZDT")
+    et_time = now_utc.astimezone(zoneinfo.ZoneInfo("America/New_York")).strftime("%Y-%m-%d %I:%M:%S %p ET")
     trade_id = f"TRD-{int(time.time())}"
     th_data.setdefault("trades", []).insert(0, {
         "id": trade_id,
@@ -894,8 +895,8 @@ async def handle_post_demo_sell(request: web.Request) -> web.Response:
     # Record sell in trade_history.json
     th_data = read_json_safe(TRADER_DIR / "trade_history.json") or {"trades": []}
     now_utc = datetime.datetime.now(datetime.timezone.utc)
-    nz_time = (now_utc + datetime.timedelta(hours=13)).strftime("%Y-%m-%d %I:%M:%S %p NZDT")
-    et_time = (now_utc - datetime.timedelta(hours=5)).strftime("%Y-%m-%d %I:%M:%S %p ET")
+    nz_time = now_utc.astimezone(zoneinfo.ZoneInfo("Pacific/Auckland")).strftime("%Y-%m-%d %I:%M:%S %p NZDT")
+    et_time = now_utc.astimezone(zoneinfo.ZoneInfo("America/New_York")).strftime("%Y-%m-%d %I:%M:%S %p ET")
     trade_id = f"TRD-{int(time.time())}"
     exit_reason = "1R Profit Target Reached" if realized_pnl > 0 else ("Midpoint Stop Cut Loss" if realized_pnl < 0 else "09:55 Flat-by-Close Rule")
     th_data.setdefault("trades", []).insert(0, {
@@ -955,7 +956,7 @@ async def handle_get_lookup(request: web.Request) -> web.Response:
         "--stop", "or-mid",
         "--or-high", str(or_high),
         "--or-low", str(or_low),
-        "--target", "1R",
+        "--target", "2R",
         "--write"
     ], timeout=15.0)
     
@@ -1023,7 +1024,7 @@ async def handle_get_gemini_news(request: web.Request) -> web.Response:
     """Analyze real-time news and catalysts using Gemini 3.5 Flash Lite."""
     symbol = request.query.get("symbol", "TSLA").upper()
     force = request.query.get("force", "false").lower() == "true"
-    args = ["trader-news/news.py", "--tickers", symbol, "--hours", "24", "--json"]
+    args = ["trader-news/news.py", "--tickers", symbol, "--hours", "72", "--all", "--config", str(TRADER_DIR / "config.json"), "--json"]
     code, stdout, stderr = await run_cli_cmd(args, timeout=15.0)
     news_items = []
     price_data = {}
@@ -1109,6 +1110,27 @@ async def handle_post_send_report(request: web.Request) -> web.Response:
     res = send_daily_market_close_report()
     return web.json_response(res)
 
+async def handle_get_report_summary(request: web.Request) -> web.Response:
+    """Return structured daily broker statement summary data."""
+    from trader.daily_reporter import build_daily_report_data
+    return web.json_response({"success": True, "data": build_daily_report_data()})
+
+async def handle_get_statement_pdf(request: web.Request) -> web.Response:
+    """Returns the official broker statement PDF for download or inline viewing."""
+    try:
+        from trader.statement_pdf import generate_broker_statement_pdf
+        from trader.daily_reporter import build_daily_report_data
+        data = build_daily_report_data()
+        pdf_bytes = generate_broker_statement_pdf(data)
+        filename = f"TigerBrokersNZ_Statement_{data['nz_date']}.pdf"
+        return web.Response(
+            body=pdf_bytes,
+            content_type="application/pdf",
+            headers={"Content-Disposition": f'inline; filename="{filename}"'}
+        )
+    except Exception as e:
+        return web.Response(text=f"Error generating statement: {e}", status=500)
+
 # --- WebSocket Handler ---
 
 async def handle_websocket(request: web.Request) -> web.WebSocketResponse:
@@ -1164,9 +1186,9 @@ async def background_poller():
                         "fired": read_json_safe(STATE_DIR / "alerts.json")
                     })
             
-            # 24/7 Autonomous Trading Loop Execution
+            # 24/7 Autonomous Trading Loop Execution (non-blocking thread)
             try:
-                run_auto_trader_cycle()
+                await asyncio.to_thread(run_auto_trader_cycle)
             except Exception:
                 pass
 
@@ -1223,11 +1245,11 @@ async def background_poller():
                 "type": "telemetry",
                 "clock": clock,
                 "telemetry": {
-                    "cash": portfolio.get("cash", config.get("budget", 5000)),
+                    "cash": portfolio.get("cash", config.get("budget", 200.0)),
                     "trades_today": trades_today,
-                    "max_trades": config.get("max_trades_per_day", 3),
+                    "max_trades": config.get("max_trades_per_day", 4),
                     "risk_today": round(risk_today, 2),
-                    "max_daily_loss": config.get("max_daily_loss_usd", 150),
+                    "max_daily_loss": config.get("max_daily_loss_usd", 6.0),
                     "open_positions_count": len(portfolio.get("positions", [])),
                     "paper_mode": config.get("paper", True),
                     "auto_scan_enabled": auto_scan_enabled
@@ -1272,6 +1294,8 @@ async def init_app() -> web.Application:
     app.router.add_get("/api/tunnel", handle_get_tunnel)
     app.router.add_get("/api/chart/data", handle_get_chart_data)
     app.router.add_post("/api/report/send", handle_post_send_report)
+    app.router.add_get("/api/report/summary", handle_get_report_summary)
+    app.router.add_get("/api/report/statement.pdf", handle_get_statement_pdf)
     
     # WebSocket route
     app.router.add_get("/ws", handle_websocket)

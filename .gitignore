@@ -18,6 +18,7 @@ trader/state/current_tunnel_url.txt
 trader/state/autotrader_state.json
 trader/state/pelosi.json
 trader/state/ptr-pdfs/
+trader/statements/
 
 # OS / Editor
 .DS_Store

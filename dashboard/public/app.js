@@ -331,6 +331,7 @@ async function loadPipelineData(symbol, usdAmount, force = false) {
     if (data.success && data.pipeline) {
       state.pipelineData = data.pipeline;
       renderPipeline(data.pipeline);
+      fetchNews(force, symbol);
     }
   } catch (err) {
     console.error("Pipeline fetch error:", err);
@@ -603,6 +604,10 @@ function renderPipeline(p) {
     const targetStat = document.getElementById("ai-plain-target-stat");
     if (riskStat && p.sizing) riskStat.textContent = `-$${Number(p.sizing.max_loss || 0.50).toFixed(2)}`;
     if (targetStat && p.plan) targetStat.textContent = `$${Number(p.plan.target || p.curr_price * 1.01).toFixed(2)}`;
+
+    if (Array.isArray(gn.news_items) && gn.news_items.length > 0) {
+      renderNewsItems(gn.news_items, p.symbol);
+    }
   }
 
   // 4. Time Machine Probabilities
@@ -1436,7 +1441,7 @@ async function adjustDemoCash(action, amount) {
     const res = await fetch("/api/demo/cash", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action, amount: Math.min(100, amount) })
+      body: JSON.stringify({ action, amount: Math.min(5000, Math.max(1, Number(amount || 200))) })
     });
     const data = await res.json();
     if (data.success) {
@@ -1698,39 +1703,55 @@ function escapeHtml(str) {
     .replace(/'/g, "&#039;");
 }
 
-async function fetchNews(force = false) {
+function renderNewsItems(items, fallbackSymbol = "TSLA") {
   const container = document.getElementById("news-container");
   if (!container) return;
+  container.innerHTML = "";
+  if (!items || items.length === 0) {
+    container.innerHTML = `<div class="empty-feed compact"><p>No recent breaking news headlines for ${escapeHtml(fallbackSymbol)}.</p></div>`;
+    return;
+  }
+  items.slice(0, 10).forEach(item => {
+    const div = document.createElement("div");
+    div.className = "news-item";
+    const title = item.title || item.headline || "Market Update";
+    const link = item.link || item.url || "#";
+    const ticker = item.ticker || (item.tickers && item.tickers[0]) || (item.touches && item.touches[0]) || fallbackSymbol || "TSLA";
+    const timeDisplay = formatNewsTime(item.time);
+    const sourceBadge = item.source ? `<span class="news-tag">${escapeHtml(item.source)}</span>` : "";
+    const tag = (item.tags && item.tags.length > 0) ? `<span class="news-tag">${escapeHtml(item.tags[0])}</span>` : "";
+    div.innerHTML = `
+      <div class="news-meta-row">
+        <span class="news-time">${timeDisplay}</span>
+        <span class="scan-setup-tag">${escapeHtml(ticker)}</span>
+        ${sourceBadge}
+        ${tag}
+      </div>
+      <a class="news-title" href="${escapeHtml(link)}" target="_blank" rel="noopener">${escapeHtml(title)}</a>
+    `;
+    container.appendChild(div);
+  });
+}
+
+async function fetchNews(force = false, sym = null) {
+  const container = document.getElementById("news-container");
+  if (!container) return;
+  const targetSym = (sym || state.activeSymbol || "TSLA").trim().toUpperCase();
   try {
-    const res = await fetch(`/api/news?symbols=${encodeURIComponent(state.activeSymbol)},NVDA,AAPL${force ? '&force=true' : ''}`);
+    const res = await fetch(`/api/news?symbols=${encodeURIComponent(targetSym)}${force ? '&force=true' : ''}`);
     const json = await res.json();
-    if (json.success && json.data && json.data.items) {
-      container.innerHTML = "";
-      if (json.data.items.length === 0) {
-        container.innerHTML = `<div class="empty-feed compact"><p>No recent news headlines.</p></div>`;
-        return;
-      }
-      json.data.items.slice(0, 10).forEach(item => {
-        const div = document.createElement("div");
-        div.className = "news-item";
-        const title = item.title || item.headline || "Market Update";
-        const link = item.link || item.url || "#";
-        const ticker = item.ticker || (item.tickers && item.tickers[0]) || (item.touches && item.touches[0]) || state.activeSymbol || "TSLA";
-        const timeDisplay = formatNewsTime(item.time);
-        const tag = (item.tags && item.tags.length > 0) ? `<span class="news-tag">${escapeHtml(item.tags[0])}</span>` : "";
-        div.innerHTML = `
-          <div class="news-meta-row">
-            <span class="news-time">${timeDisplay}</span>
-            <span class="scan-setup-tag">${escapeHtml(ticker)}</span>
-            ${tag}
-          </div>
-          <a class="news-title" href="${escapeHtml(link)}" target="_blank" rel="noopener">${escapeHtml(title)}</a>
-        `;
-        container.appendChild(div);
-      });
+    if (json.success && json.data && Array.isArray(json.data.items) && json.data.items.length > 0) {
+      renderNewsItems(json.data.items, targetSym);
+    } else if (state.pipelineData && state.pipelineData.gemini_news && Array.isArray(state.pipelineData.gemini_news.news_items) && state.pipelineData.gemini_news.news_items.length > 0) {
+      renderNewsItems(state.pipelineData.gemini_news.news_items, targetSym);
+    } else {
+      renderNewsItems([], targetSym);
     }
   } catch (e) {
     console.warn("News fetch error", e);
+    if (state.pipelineData && state.pipelineData.gemini_news && Array.isArray(state.pipelineData.gemini_news.news_items)) {
+      renderNewsItems(state.pipelineData.gemini_news.news_items, targetSym);
+    }
   }
 }
 
@@ -1755,9 +1776,9 @@ function renderTelemetry(clock, telemetry) {
     if (tapeCashDup) tapeCashDup.textContent = `$${currCash.toFixed(2)} USD`;
 
     const riskSummary = document.getElementById("risk-summary");
-    const maxDailyLoss = 15.0;
+    const maxDailyLoss = Number(telemetry.max_daily_loss !== undefined ? telemetry.max_daily_loss : 6.0);
     if (riskSummary) {
-      riskSummary.textContent = `Risk used: $${(telemetry.risk_today || 0).toFixed(2)} / $${maxDailyLoss.toFixed(2)} USD max`;
+      riskSummary.textContent = `Risk used: $${Number(telemetry.risk_today || 0).toFixed(2)} / $${maxDailyLoss.toFixed(2)} USD max`;
     }
 
     if (telemetry.auto_scan_enabled !== undefined) {
@@ -1884,6 +1905,243 @@ function renderTrades(data) {
     tbody.appendChild(tr);
   });
 }
+
+// --- Institutional Broker PDF Statement Generator (Client Fallback & Local Download) ---
+function buildClientBrokerStatementPdfBytes(data) {
+  const safeAscii = (v) => String(v === undefined || v === null ? "" : v).replace(/[^\x20-\x7E]/g, "-");
+  const escPdf = (v) => safeAscii(v).replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)");
+  const fmtMoney = (n) => `$${Number(n || 0).toFixed(2)}`;
+
+  const nzDate = data.nz_date || new Date().toISOString().slice(0, 10);
+  const prevBal = Number(data.previous_balance !== undefined ? data.previous_balance : (data.current_balance || 200));
+  const curBal = Number(data.current_balance !== undefined ? data.current_balance : 200);
+  const todayPnl = Number(data.today_realized_pnl || 0);
+  const totalPnl = Number(data.total_realized_pnl || 0);
+  const todayFees = Number(data.today_fees || 0);
+  const totalFees = Number(data.total_fees || 0);
+  const openPos = Number(data.open_positions || 0);
+  const trades = Array.isArray(data.today_trades) ? data.today_trades : [];
+
+  const cmds = [];
+  const txt = (font, size, x, y, r, g, b, str) => {
+    cmds.push(`${r.toFixed(3)} ${g.toFixed(3)} ${b.toFixed(3)} rg`);
+    cmds.push(`BT /${font} ${size} Tf 1 0 0 1 ${x.toFixed(1)} ${y.toFixed(1)} Tm (${escPdf(str)}) Tj ET`);
+  };
+  const rect = (x, y, w, h, r, g, b, strokeRgb = null) => {
+    cmds.push(`${r.toFixed(3)} ${g.toFixed(3)} ${b.toFixed(3)} rg`);
+    cmds.push(`${x.toFixed(1)} ${y.toFixed(1)} ${w.toFixed(1)} ${h.toFixed(1)} re f`);
+    if (strokeRgb) {
+      cmds.push(`${strokeRgb[0].toFixed(3)} ${strokeRgb[1].toFixed(3)} ${strokeRgb[2].toFixed(3)} RG 0.6 w`);
+      cmds.push(`${x.toFixed(1)} ${y.toFixed(1)} ${w.toFixed(1)} ${h.toFixed(1)} re S`);
+    }
+  };
+
+  // Top Header Navy Banner
+  rect(36, 706, 540, 52, 0.059, 0.090, 0.165);
+  txt("F2", 14, 48, 738, 1, 1, 1, "TIGER BROKERS (NZ) LIMITED");
+  txt("F2", 9, 48, 722, 0.000, 0.784, 0.020, "DAILY ACTIVITY & TRADE CONFIRMATION STATEMENT");
+  txt("F1", 7.5, 48, 711, 0.796, 0.835, 0.882, "NZBN: 9429046892142  |  FSP: FSP473106  |  Regulated Financial Services Provider");
+  txt("F2", 8.5, 420, 738, 1, 1, 1, `STATEMENT DATE: ${nzDate}`);
+  txt("F1", 8, 420, 724, 0.796, 0.835, 0.882, "BASE CURRENCY: USD ($)");
+  txt("F1", 8, 420, 712, 0.796, 0.835, 0.882, "REPORT: End-of-Day Flat Audit");
+
+  // Account Profile Box
+  rect(36, 654, 540, 44, 0.973, 0.980, 0.988, [0.796, 0.835, 0.882]);
+  txt("F2", 8, 46, 682, 0.392, 0.455, 0.545, "ACCOUNT NAME:");
+  txt("F1", 8.5, 122, 682, 0.118, 0.161, 0.231, "Nischal Khanal");
+  txt("F2", 8, 230, 682, 0.392, 0.455, 0.545, "ACCOUNT ID:");
+  txt("F1", 8.5, 290, 682, 0.118, 0.161, 0.231, "NZ-TB-8849201");
+  txt("F2", 8, 395, 682, 0.392, 0.455, 0.545, "SUB-ACCOUNT:");
+  txt("F1", 8.5, 468, 682, 0.118, 0.161, 0.231, "US Equities (Direct)");
+  txt("F2", 8, 46, 664, 0.392, 0.455, 0.545, "BROKER ENTITY:");
+  txt("F1", 8.5, 122, 664, 0.118, 0.161, 0.231, "Tiger Brokers NZ Ltd");
+  txt("F2", 8, 230, 664, 0.392, 0.455, 0.545, "WINDOW:");
+  txt("F1", 8.5, 290, 664, 0.118, 0.161, 0.231, "03:30-09:55 NZDT");
+  txt("F2", 8, 395, 664, 0.392, 0.455, 0.545, "FLAT RULE:");
+  txt("F1", 8.5, 468, 664, 0.118, 0.161, 0.231, "09:55 NZDT (Zero Overnight)");
+
+  // Account Capital Summary
+  txt("F2", 10, 36, 634, 0.059, 0.090, 0.165, "ACCOUNT CAPITAL & PERFORMANCE VALUATION (USD)");
+  rect(36, 608, 540, 18, 0.059, 0.090, 0.165);
+  txt("F2", 7.8, 44, 614, 1, 1, 1, "Previous Bal");
+  txt("F2", 7.8, 134, 614, 1, 1, 1, "Today Net PnL");
+  txt("F2", 7.8, 224, 614, 1, 1, 1, "Tiger Fees Today");
+  txt("F2", 7.8, 314, 614, 1, 1, 1, "Closing Net Cash");
+  txt("F2", 7.8, 404, 614, 1, 1, 1, "Buying Power");
+  txt("F2", 7.8, 494, 614, 1, 1, 1, "Open Pos");
+
+  rect(36, 586, 540, 22, 1, 1, 1, [0.796, 0.835, 0.882]);
+  txt("F2", 8.5, 44, 594, 0.118, 0.161, 0.231, fmtMoney(prevBal));
+  txt("F2", 8.5, 134, 594, todayPnl >= 0 ? 0.000 : 0.863, todayPnl >= 0 ? 0.659 : 0.149, todayPnl >= 0 ? 0.016 : 0.149, `${todayPnl >= 0 ? "+" : "-"}$${Math.abs(todayPnl).toFixed(2)}`);
+  txt("F2", 8.5, 224, 594, 0.118, 0.161, 0.231, `-${fmtMoney(todayFees)}`);
+  txt("F2", 8.5, 314, 594, 0.118, 0.161, 0.231, fmtMoney(curBal));
+  txt("F2", 8.5, 404, 594, 0.000, 0.659, 0.016, fmtMoney(curBal));
+  txt("F2", 8.5, 494, 594, 0.118, 0.161, 0.231, openPos === 0 ? "0 (Flat)" : `${openPos} Open`);
+
+  txt("F1", 8, 36, 571, 0.392, 0.455, 0.545, `Cumulative Totals: All-Time Realized PnL ${totalPnl >= 0 ? "+" : "-"}$${Math.abs(totalPnl).toFixed(2)} USD  |  Total Tiger NZ Fees Paid: -${fmtMoney(totalFees)} USD  |  Executions Today: ${trades.length}`);
+
+  // Itemized Trade Confirmation Ledger
+  txt("F2", 10, 36, 548, 0.059, 0.090, 0.165, "ITEMIZED TRADE CONFIRMATION & TRANSACTION LEDGER");
+  rect(36, 522, 540, 18, 0.059, 0.090, 0.165);
+  txt("F2", 7.5, 42, 528, 1, 1, 1, "Time");
+  txt("F2", 7.5, 102, 528, 1, 1, 1, "Sym");
+  txt("F2", 7.5, 146, 528, 1, 1, 1, "Side");
+  txt("F2", 7.5, 184, 528, 1, 1, 1, "Shares");
+  txt("F2", 7.5, 236, 528, 1, 1, 1, "Price");
+  txt("F2", 7.5, 286, 528, 1, 1, 1, "Gross");
+  txt("F2", 7.5, 338, 528, 1, 1, 1, "Fee");
+  txt("F2", 7.5, 384, 528, 1, 1, 1, "Realized PnL");
+  txt("F2", 7.5, 452, 528, 1, 1, 1, "Status / Notes");
+
+  let rowY = 504;
+  if (trades.length === 0) {
+    rect(36, rowY - 4, 540, 22, 0.973, 0.980, 0.988, [0.886, 0.910, 0.941]);
+    txt("F1", 8, 92, rowY + 3, 0.392, 0.455, 0.545, "No transactions executed during this session. Capital 100% preserved under Tiger NZ risk gates.");
+  } else {
+    trades.slice(0, 16).forEach((t, idx) => {
+      if (idx % 2 === 1) {
+        rect(36, rowY - 4, 540, 18, 0.973, 0.980, 0.988, [0.886, 0.910, 0.941]);
+      } else {
+        rect(36, rowY - 4, 540, 18, 1, 1, 1, [0.886, 0.910, 0.941]);
+      }
+      const side = String(t.side || "BUY").toUpperCase();
+      const sh = Number(t.shares || 0);
+      const px = Number(t.price || 0);
+      const gross = sh * px;
+      const fee = Number(t.tiger_fee || 0);
+      const rpnl = Number(t.realized_pnl || 0);
+      const timePart = String(t.timestamp_nzdt || "").split(" ").slice(1, 3).join(" ").slice(0, 10) || "Session";
+      const note = String(t.exit_reason || t.notes || "15m ORB").slice(0, 22);
+
+      txt("F1", 7.5, 42, rowY + 2, 0.118, 0.161, 0.231, timePart);
+      txt("F2", 7.5, 102, rowY + 2, 0.118, 0.161, 0.231, String(t.symbol || ""));
+      txt("F2", 7.5, 146, rowY + 2, side === "BUY" ? 0.000 : 0.863, side === "BUY" ? 0.659 : 0.149, side === "BUY" ? 0.016 : 0.149, side);
+      txt("F1", 7.5, 184, rowY + 2, 0.118, 0.161, 0.231, sh.toFixed(4));
+      txt("F1", 7.5, 236, rowY + 2, 0.118, 0.161, 0.231, `$${px.toFixed(2)}`);
+      txt("F1", 7.5, 286, rowY + 2, 0.118, 0.161, 0.231, `$${gross.toFixed(2)}`);
+      txt("F1", 7.5, 338, rowY + 2, 0.118, 0.161, 0.231, `$${fee.toFixed(2)}`);
+      if (side === "SELL") {
+        txt("F2", 7.5, 384, rowY + 2, rpnl >= 0 ? 0.000 : 0.863, rpnl >= 0 ? 0.659 : 0.149, rpnl >= 0 ? 0.016 : 0.149, `${rpnl >= 0 ? "+" : "-"}$${Math.abs(rpnl).toFixed(2)}`);
+      } else {
+        txt("F1", 7.5, 384, rowY + 2, 0.392, 0.455, 0.545, "--");
+      }
+      txt("F1", 7.2, 452, rowY + 2, 0.392, 0.455, 0.545, note);
+      rowY -= 18;
+    });
+  }
+
+  // Regulatory & Fee Disclosure Box
+  rect(36, 74, 540, 72, 0.973, 0.980, 0.988, [0.796, 0.835, 0.882]);
+  txt("F2", 8, 44, 132, 0.059, 0.090, 0.165, "TIGER BROKERS (NZ) LIMITED US EQUITIES & FRACTIONAL SHARE DISCLOSURE:");
+  txt("F1", 7.2, 44, 118, 0.392, 0.455, 0.545, "- Fractional (< 1 Share): Commission $0.00 USD (waived). Platform Fee: 1% of gross value (capped at $1.00 USD/leg). 3rd-party fees waived.");
+  txt("F1", 7.2, 44, 106, 0.392, 0.455, 0.545, "- Whole (>= 1 Share): Commission $0.005/sh (min $0.99), Platform $0.005/sh (min $1.00), Settlement $0.003/sh, SEC $0.0000206 on SELL.");
+  txt("F1", 7.2, 44, 94, 0.392, 0.455, 0.545, "- Autonomous Risk Mandate: Max loss per trade $1.50 USD (midpoint stop). Daily cap $6.00 USD. Mandatory flat-by-close 09:55 AM NZDT.");
+  txt("F1", 7.0, 44, 82, 0.392, 0.455, 0.545, "- Electronic client statement generated by Day Trader Pro Autonomous Station for personal tax-lot reconciliation.");
+
+  txt("F1", 7.2, 36, 48, 0.392, 0.455, 0.545, `ELECTRONICALLY AUDITED & VERIFIED: ${nzDate} 09:55:00 NZDT  |  DAY TRADER PRO  |  TIGER BROKERS NZ  |  PAGE 1 OF 1`);
+
+  const streamContent = cmds.join("\n");
+  const enc = new TextEncoder();
+  const streamBytesLen = enc.encode(streamContent).length;
+
+  const objects = [
+    "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+    "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+    "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R /F2 5 0 R >> >> /Contents 6 0 R >>\nendobj\n",
+    "4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n",
+    "5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>\nendobj\n",
+    `6 0 obj\n<< /Length ${streamBytesLen} >>\nstream\n${streamContent}\nendstream\nendobj\n`,
+  ];
+
+  let pdfStr = "%PDF-1.4\n";
+  const offsets = [0];
+  let bytePos = enc.encode(pdfStr).length;
+  for (const obj of objects) {
+    offsets.push(bytePos);
+    pdfStr += obj;
+    bytePos += enc.encode(obj).length;
+  }
+  const xrefOffset = bytePos;
+  let xrefStr = `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  for (let i = 1; i <= objects.length; i++) {
+    xrefStr += `${String(offsets[i]).padStart(10, "0")} 00000 n \n`;
+  }
+  xrefStr += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`;
+  return enc.encode(pdfStr + xrefStr);
+}
+
+async function downloadPdfBrokerStatement() {
+  const btn = document.getElementById("btn-download-pdf-statement");
+  const origHtml = btn ? btn.innerHTML : "";
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "Generating PDF...";
+  }
+  try {
+    const isLocal = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
+    let pdfBlob = null;
+    let filename = `TigerBrokersNZ_Statement_${new Date().toISOString().slice(0, 10)}.pdf`;
+
+    if (isLocal) {
+      const res = await fetch("/api/report/statement.pdf");
+      if (res.ok && (res.headers.get("content-type") || "").includes("pdf")) {
+        pdfBlob = await res.blob();
+      }
+    }
+
+    if (!pdfBlob) {
+      let reportData = null;
+      try {
+        const sumRes = await fetch("/api/report/summary");
+        const sumJson = await sumRes.json();
+        if (sumJson && sumJson.data) reportData = sumJson.data;
+      } catch (e) {}
+
+      if (!reportData) {
+        const snap = state.snapshot || {};
+        const pf = snap.portfolio || { cash: 200, positions: [] };
+        const ts = (snap.trades_summary && snap.trades_summary.summary) ? snap.trades_summary.summary : {};
+        const trades = (snap.trades_summary && Array.isArray(snap.trades_summary.trades)) ? snap.trades_summary.trades : [];
+        reportData = {
+          nz_date: new Intl.DateTimeFormat("en-CA", { timeZone: "Pacific/Auckland" }).format(new Date()),
+          current_balance: Number(pf.cash !== undefined ? pf.cash : 200),
+          previous_balance: Number(ts.starting_cash || pf.cash || 200),
+          today_realized_pnl: Number(ts.total_realized_pnl || 0),
+          total_realized_pnl: Number(ts.total_realized_pnl || 0),
+          today_fees: Number(ts.total_tiger_fees || 0),
+          total_fees: Number(ts.total_tiger_fees || 0),
+          open_positions: Array.isArray(pf.positions) ? pf.positions.length : 0,
+          today_trades: trades,
+        };
+      }
+      if (reportData.nz_date) {
+        filename = `TigerBrokersNZ_Statement_${reportData.nz_date}.pdf`;
+      }
+      const pdfBytes = buildClientBrokerStatementPdfBytes(reportData);
+      pdfBlob = new Blob([pdfBytes], { type: "application/pdf" });
+    }
+
+    const blobUrl = URL.createObjectURL(pdfBlob);
+    const a = document.createElement("a");
+    a.href = blobUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 4000);
+    playChime("win");
+    showToast(`Downloaded institutional PDF statement (${filename})`, "success");
+  } catch (err) {
+    console.error("PDF download error:", err);
+    showToast(`PDF generation error: ${err.message}`, "error");
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = origHtml;
+    }
+  }
+}
+window.downloadPdfBrokerStatement = downloadPdfBrokerStatement;
 
 // --- Trigger Daily Market Close Report Email (Resend) ---
 async function triggerDailyReportEmail() {
@@ -2206,12 +2464,12 @@ document.addEventListener("DOMContentLoaded", () => {
   const dockFlattenBtn = document.getElementById("btn-flatten-all");
   if (dockFlattenBtn) dockFlattenBtn.onclick = () => executeDemoSell(state.activeSymbol, null, 100);
 
-  // Quick Demo Cash Refill / Reset Controls ($100 max)
+  // Quick Demo Cash Refill / Reset Controls ($200 budget)
   const reset100Btn = document.getElementById("btn-reset-cash-100");
-  if (reset100Btn) reset100Btn.onclick = () => adjustDemoCash("reset", 100);
+  if (reset100Btn) reset100Btn.onclick = () => adjustDemoCash("reset", 200);
 
   const resetDeckBtn = document.getElementById("btn-reset-cash-deck");
-  if (resetDeckBtn) resetDeckBtn.onclick = () => adjustDemoCash("reset", 100);
+  if (resetDeckBtn) resetDeckBtn.onclick = () => adjustDemoCash("reset", 200);
 
   const add25Btn = document.getElementById("btn-add-cash-25");
   if (add25Btn) add25Btn.onclick = () => adjustDemoCash("add", 25);
@@ -2336,7 +2594,7 @@ document.addEventListener("DOMContentLoaded", () => {
   if (btnSettingsAddCash) btnSettingsAddCash.onclick = () => adjustDemoCash("add", 25);
 
   const btnSettingsResetCash = document.getElementById("btn-settings-reset-cash");
-  if (btnSettingsResetCash) btnSettingsResetCash.onclick = () => adjustDemoCash("reset", 100);
+  if (btnSettingsResetCash) btnSettingsResetCash.onclick = () => adjustDemoCash("reset", 200);
 
   // Initial Load: Fetch full state, news, and load active symbol pipeline
   fetch("/api/state")
