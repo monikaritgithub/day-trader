@@ -291,7 +291,8 @@ def send_daily_market_close_report() -> Dict[str, Any]:
     url = "https://api.resend.com/emails"
     headers = {
         "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) DayTrader/1.0"
     }
 
     req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
@@ -303,7 +304,8 @@ def send_daily_market_close_report() -> Dict[str, Any]:
             return {
                 "success": True,
                 "email_id": res_json.get("id"),
-                "recipient": NOTIFICATION_EMAIL,
+                "recipient": recipient,
+                "message": f"Daily statement successfully dispatched to {recipient} via Resend (ID: {res_json.get('id')})",
                 "data": data
             }
     except urllib.error.HTTPError as e:

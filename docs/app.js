@@ -1856,16 +1856,20 @@ async function triggerDailyReportEmail() {
     btn.disabled = true;
     btn.textContent = "Dispatching via Resend...";
   }
-  showToast("Sending daily statement to khanalnischal2075@gmail.com via Resend...", "info");
+  showToast("Compiling daily statement for khanalnischal2075@gmail.com...", "info");
   try {
     const res = await fetch("/api/report/send", { method: "POST" });
     const data = await res.json();
     if (data.success) {
-      showToast("Daily statement successfully dispatched to khanalnischal2075@gmail.com!", "success");
+      const msg = data.message || `Daily statement successfully dispatched to ${data.recipient || 'khanalnischal2075@gmail.com'}!`;
+      playChime("win");
+      showToast(msg, "success");
     } else {
+      playChime("alert");
       showToast(`Email error: ${data.error || "Failed to send email"}`, "error");
     }
   } catch (err) {
+    playChime("alert");
     showToast(`Failed to trigger email: ${err.message}`, "error");
   } finally {
     if (btn) {
