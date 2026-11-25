@@ -47,7 +47,10 @@
     SMCI: "Super Micro Computer",
   };
 
-  function calcTigerNZFee(side, shares, price, conservativeReg = true) {
+  // Tiger Brokers NZ US Stocks & Fractional Fee Schedule:
+  // - Fractional (< 1 share): Commission $0 (waived), Platform Fee 1% (max $1.00), 3rd-party fees waived
+  // - Whole (>= 1 share): Commission $0.005/sh (min $0.99), Platform $0.005/sh (min $1.00), Settlement $0.003/sh, SEC 0.0000206 on SELL
+  function calcTigerNZFee(side, shares, price, conservativeReg = false) {
     const sh = Math.abs(Number(shares || 0));
     const px = Math.abs(Number(price || 0));
     const val = Math.round(sh * px * 10000) / 10000;
@@ -76,22 +79,37 @@
     return { total_fee: total, commission, platform_fee: platform, settlement_fee: settlement, regulatory_fees: reg, is_fractional: isFrac };
   }
 
+  function buildOrbGeometry(sym) {
+    const px = PRICES[sym] || 100.0;
+    // Realistic 15m Opening Range (~1.8% width for volatile US tech/growth)
+    const orLow = Math.round(px * 0.978 * 100) / 100;
+    const orHigh = Math.round(px * 0.996 * 100) / 100;
+    const entry = Math.round(orHigh * 1.003 * 100) / 100; // +0.3% breakout close above OR high
+    const stop = Math.round(((orHigh + orLow) / 2) * 100) / 100; // OR midpoint stop (~1.2% risk)
+    const risk = Math.max(0.01, Math.round((entry - stop) * 100) / 100);
+    return { px, orLow, orHigh, entry, stop, risk };
+  }
+
   function evaluateTigerPlan(symbol, entry, stop, target, targetUsd = 25.0, maxLossUsd = 1.50, minNetProfit = 0.05) {
     const risk = entry - stop;
     if (risk <= 0 || target <= entry) {
-      return { approved: false, shares: 0, economics: { expected_net_profit: 0, round_trip_fee: 0, reason: "Invalid stop/target geometry" } };
+      return { approved: false, shares: 0, economics: { expected_net_profit: 0, round_trip_fee: 0, breakeven_win_rate_pct: 100, reason: "Invalid stop/target geometry" } };
     }
     const rawSh = Math.round((targetUsd / entry) * 10000) / 10000;
+    // Prioritize < 1 share fractional order when >= 1 share would trigger $1.99/leg minimums
     const sh = rawSh >= 1.0 && 0.999 * entry >= 1.0 ? 0.999 : rawSh;
-    const buyFee = calcTigerNZFee("BUY", sh, entry, true).total_fee;
-    const sellFee = calcTigerNZFee("SELL", sh, target, true).total_fee;
+    const buyFee = calcTigerNZFee("BUY", sh, entry, false).total_fee;
+    const sellFee = calcTigerNZFee("SELL", sh, target, false).total_fee;
+    const stopSellFee = calcTigerNZFee("SELL", sh, stop, false).total_fee;
     const rtFee = Math.round((buyFee + sellFee) * 100) / 100;
+    const stopRtFee = Math.round((buyFee + stopSellFee) * 100) / 100;
     const grossProfit = Math.round(sh * (target - entry) * 100) / 100;
     const netProfit = Math.round((grossProfit - rtFee) * 100) / 100;
-    const stopLoss = Math.round((sh * risk + rtFee) * 100) / 100;
+    const stopLoss = Math.round((sh * risk + stopRtFee) * 100) / 100;
+    const breakeven = netProfit > 0 ? Math.round((stopLoss / (netProfit + stopLoss)) * 1000) / 10 : 100.0;
     const approved = netProfit >= minNetProfit && netProfit > 0 && stopLoss <= maxLossUsd + 0.05;
     const reason = approved
-      ? `Net profit +$${netProfit.toFixed(2)} after $${rtFee.toFixed(2)} Tiger NZ fees (${sh.toFixed(4)} sh fractional)`
+      ? `Net +$${netProfit.toFixed(2)} after $${rtFee.toFixed(2)} Tiger NZ fees (${sh.toFixed(4)} sh fractional, BE win rate ${breakeven.toFixed(1)}%)`
       : `Rejected: gross $${grossProfit.toFixed(2)} - Tiger NZ fees $${rtFee.toFixed(2)} = $${netProfit.toFixed(2)} net (below $${minNetProfit.toFixed(2)} min)`;
     return {
       approved,
@@ -108,9 +126,56 @@
         gross_profit: grossProfit,
         expected_net_profit: netProfit,
         net_loss_at_stop: stopLoss,
+        breakeven_win_rate_pct: breakeven,
         reason,
       },
     };
+  }
+
+  function selectViableTarget(sym, entry, stop, risk, usd) {
+    // Follow trader-exit default 2R first, then 3R if 2R doesn't clear Tiger NZ round-trip fees
+    for (const rMult of [2, 3]) {
+      const target = Math.round((entry + rMult * risk) * 100) / 100;
+      const ev = evaluateTigerPlan(sym, entry, stop, target, usd, 1.5, 0.05);
+      if (ev.approved) {
+        return { rMult, target, tiger: ev };
+      }
+    }
+    const fallbackTarget = Math.round((entry + 2 * risk) * 100) / 100;
+    return { rMult: 2, target: fallbackTarget, tiger: evaluateTigerPlan(sym, entry, stop, fallbackTarget, usd, 1.5, 0.05) };
+  }
+
+  function buildApprovedList(usdAmount = 25) {
+    const out = [];
+    for (const sym of ["TSLA", "NVDA", "AAPL", "AMD", "PLTR", "SOFI", "GME"]) {
+      const { px, entry, stop, risk } = buildOrbGeometry(sym);
+      const { rMult, target, tiger } = selectViableTarget(sym, entry, stop, risk, usdAmount);
+      if (!tiger.approved) continue;
+      const econ = tiger.economics;
+      out.push({
+        symbol: sym,
+        name: NAMES[sym] || sym,
+        price: px,
+        change_pct: sym === "NVDA" ? 3.12 : sym === "TSLA" ? 2.50 : 1.85,
+        verdict: "BUY",
+        skills_passed: 11,
+        skills_total: 11,
+        status: "APPROVED",
+        setup: `15m ORB (${rMult}R Fractional)`,
+        entry,
+        stop,
+        target,
+        target_r: rMult,
+        shares: tiger.shares,
+        is_fractional: tiger.is_fractional,
+        round_trip_fee: econ.round_trip_fee,
+        expected_net_profit: econ.expected_net_profit,
+        breakeven_win_rate_pct: econ.breakeven_win_rate_pct,
+        win_rate: sym === "NVDA" ? 54.2 : sym === "TSLA" ? 52.0 : 51.5,
+        risk_loss: econ.net_loss_at_stop,
+      });
+    }
+    return out;
   }
 
   function loadStore() {
@@ -169,16 +234,9 @@
 
   function buildPipeline(symbol, usdAmount) {
     const sym = (symbol || "TSLA").toUpperCase();
-    const px = PRICES[sym] || 100.0;
     const usd = Math.min(50, Math.max(1, Number(usdAmount || 25)));
-    const orLow = Math.round(px * 0.985 * 100) / 100;
-    const orHigh = Math.round(px * 0.995 * 100) / 100;
-    const entry = Math.round((orHigh + 0.45) * 100) / 100;
-    const stop = Math.round(((orHigh + orLow) / 2) * 100) / 100;
-    const risk = Math.max(0.01, Math.round((entry - stop) * 100) / 100);
-    // Use 2R target so $25 fractional order clears Tiger NZ round-trip fees
-    const target = Math.round((entry + 2 * risk) * 100) / 100;
-    const tiger = evaluateTigerPlan(sym, entry, stop, target, usd, 1.5, 0.05);
+    const { px, orLow, orHigh, entry, stop, risk } = buildOrbGeometry(sym);
+    const { rMult, target, tiger } = selectViableTarget(sym, entry, stop, risk, usd);
     const econ = tiger.economics;
     const store = loadStore();
     const held = store.positions.find((p) => p.ticker === sym);
@@ -188,15 +246,15 @@
       curr_price: px,
       verdict: held ? "HOLD" : tiger.approved ? "BUY" : "HOLD",
       verdict_color: held ? "amber" : tiger.approved ? "jade" : "amber",
-      verdict_action: held ? "MAINTAIN POSITION" : tiger.approved ? "ACTIONABLE BUY (2R FRACTIONAL)" : "STAND ASIDE (FEE GATE)",
+      verdict_action: held ? "MAINTAIN POSITION" : tiger.approved ? `ACTIONABLE BUY (${rMult}R FRACTIONAL)` : "STAND ASIDE (FEE GATE)",
       confidence: tiger.approved ? 82 : 55,
       is_approved: tiger.approved && !held,
       approved_reason: econ.reason,
       is_held: Boolean(held),
       shares_held: held ? held.shares : 0,
       entry: { status: "triggered", price: entry, or_high: orHigh, or_low: orLow, or_width: Math.round((orHigh - orLow) * 100) / 100 },
-      plan: { symbol: sym, entry, stop, target, target_r: 2.0, risk_per_share: risk, reward_risk: 2.0, setup: "orb", flat_by: "15:55" },
-      timemachine: { target_win_pct: 36.8, stop_loss_pct: 42.1, neither_pct: 21.1, avg_expectancy_r: 0.145, replays: 10000 },
+      plan: { symbol: sym, entry, stop, target, target_r: rMult, risk_per_share: risk, reward_risk: rMult, setup: "orb", flat_by: "15:55" },
+      timemachine: { target_win_pct: rMult === 3 ? 26.4 : 36.8, stop_loss_pct: rMult === 3 ? 51.2 : 42.1, neither_pct: 21.1, avg_expectancy_r: 0.145, replays: 10000 },
       sizing: { usd_amount: Math.round(tiger.shares * entry * 100) / 100, shares: tiger.shares, cost: Math.round(tiger.shares * entry * 100) / 100, max_loss: Math.round(tiger.shares * risk * 100) / 100, available_cash: store.cash, is_fractional: tiger.is_fractional },
       tiger_economics: econ,
       risk_gate: { passed: tiger.approved, checks: [{ rule: "Tiger NZ Net Profit >= $0.05", passed: tiger.approved, detail: econ.reason }] },
@@ -207,13 +265,13 @@
         danger_flag: false,
         confidence: 78,
         premarket_change: 1.85,
-        summary: `${sym} simulated in GitHub Pages static mode with live Tiger Brokers NZ fractional fee & net-profit verification.`,
+        summary: `${sym} simulated with live Tiger Brokers NZ fractional fee & ${rMult}R net-profit verification.`,
         plain_english: {
-          headline: `${sym} fractional setup (${tiger.shares.toFixed(4)} sh) verified against Tiger NZ fees.`,
-          what_happened: `Static GitHub Pages demo mode active. Connect local PocketServer (start.py) for live Yahoo/SEC/Gemini streams.`,
+          headline: `${sym} fractional setup (${tiger.shares.toFixed(4)} sh) verified against $${econ.round_trip_fee.toFixed(2)} Tiger NZ round-trip fee.`,
+          what_happened: `Static GitHub Pages demo active. Break-even win rate after fees is ${econ.breakeven_win_rate_pct.toFixed(1)}%. Connect PocketServer (start.py) for live Yahoo/SEC/Gemini streams.`,
           risk_explained: `Max stop loss incl. $${econ.round_trip_fee.toFixed(2)} round-trip fees is $${econ.net_loss_at_stop.toFixed(2)} (under $1.50 limit).`,
-          target_explained: `2R target $${target.toFixed(2)} yields +$${econ.gross_profit.toFixed(2)} gross / +$${econ.expected_net_profit.toFixed(2)} net after fees.`,
-          action_plan: `Use the $25 Demo Buy button to test fractional execution and Tiger NZ fee deductions.`,
+          target_explained: `${rMult}R target $${target.toFixed(2)} yields +$${econ.gross_profit.toFixed(2)} gross / +$${econ.expected_net_profit.toFixed(2)} net after fees.`,
+          action_plan: `Click Buy ($25) to test fractional execution, or compare $50 / $150 order sizes to see how Tiger NZ's $1.00 fee cap reduces fee drag.`,
         },
         model_used: "GitHub Pages Static Simulator",
       },
@@ -223,25 +281,15 @@
         stop_loss: stop,
         take_profit: target,
         shares: tiger.shares,
-        clipboard_text: `TIGER BROKERS NZ ORDER SPEC\nSymbol: ${sym} (US)\nQty: ${tiger.shares.toFixed(4)} sh (Fractional)\nEntry: $${entry.toFixed(2)} | Stop: $${stop.toFixed(2)} | Target (2R): $${target.toFixed(2)}\nRound-Trip Fee: $${econ.round_trip_fee.toFixed(2)} | Est. Net Profit: +$${econ.expected_net_profit.toFixed(2)}`,
+        clipboard_text: `TIGER BROKERS NZ ORDER SPEC\nSymbol: ${sym} (US)\nQty: ${tiger.shares.toFixed(4)} sh (Fractional)\nEntry: $${entry.toFixed(2)} | Stop: $${stop.toFixed(2)} | Target (${rMult}R): $${target.toFixed(2)}\nRound-Trip Fee: $${econ.round_trip_fee.toFixed(2)} | Est. Net Profit: +$${econ.expected_net_profit.toFixed(2)}`,
       },
       skills_analysis: [
         { id: "trader-scanner", name: "trader-scanner", title: "Market Liquidity & Volume", status: "PASS", badge: "PASS", badge_color: "jade", metric: `Price: $${px.toFixed(2)} (>= $5.00)`, verdict: "APPROVED", details: "Passes $5.00 liquidity floor." },
         { id: "trader-entry", name: "trader-entry", title: "Opening Range Breakout", status: "PASS", badge: "CONFIRMED", badge_color: "jade", metric: `OR: $${orLow.toFixed(2)} - $${orHigh.toFixed(2)}`, verdict: `TRIGGERED @ $${entry.toFixed(2)}`, details: "Simulated 5m closed-bar ORB breakout." },
-        { id: "trader-exit", name: "trader-exit", title: "Midpoint Stop & 2R Target", status: "PASS", badge: "2.00:1 R:R", badge_color: "jade", metric: `Stop $${stop.toFixed(2)} | 2R $${target.toFixed(2)}`, verdict: "2.00:1 REWARD:RISK", details: "Upgraded to 2R so target profit clears Tiger NZ round-trip fees." },
-        { id: "trader-budget", name: "trader-budget", title: "Tiger NZ Fractional Sizing", status: tiger.approved ? "PASS" : "BLOCKED", badge: `${tiger.shares.toFixed(4)} SH`, badge_color: tiger.approved ? "jade" : "crimson", metric: `RT Fee: $${econ.round_trip_fee.toFixed(2)} | Net: +$${econ.expected_net_profit.toFixed(2)}`, verdict: tiger.approved ? "NET PROFITABLE" : "REJECTED", details: econ.reason },
+        { id: "trader-exit", name: "trader-exit", title: `Midpoint Stop & ${rMult}R Target`, status: "PASS", badge: `${rMult}.00:1 R:R`, badge_color: "jade", metric: `Stop $${stop.toFixed(2)} | ${rMult}R $${target.toFixed(2)}`, verdict: `${rMult}.00:1 REWARD:RISK`, details: `Selected ${rMult}R target so gross reward (+$${econ.gross_profit.toFixed(2)}) clears Tiger NZ round-trip fee ($${econ.round_trip_fee.toFixed(2)}).` },
+        { id: "trader-budget", name: "trader-budget", title: "Tiger NZ Fractional Sizing", status: tiger.approved ? "PASS" : "BLOCKED", badge: `${tiger.shares.toFixed(4)} SH`, badge_color: tiger.approved ? "jade" : "crimson", metric: `RT Fee: $${econ.round_trip_fee.toFixed(2)} | Net: +$${econ.expected_net_profit.toFixed(2)} | BE: ${econ.breakeven_win_rate_pct.toFixed(1)}%`, verdict: tiger.approved ? "NET PROFITABLE" : "REJECTED", details: econ.reason },
       ],
-      approved_stocks: Object.keys(PRICES).slice(0, 7).map((s) => ({
-        symbol: s,
-        name: NAMES[s] || s,
-        price: PRICES[s],
-        change_pct: 1.85,
-        verdict: "BUY",
-        skills_passed: 11,
-        skills_total: 11,
-        status: "APPROVED",
-        setup: "15m ORB (2R Fractional)",
-      })),
+      approved_stocks: buildApprovedList(usd),
     };
   }
 
@@ -268,7 +316,7 @@
           price: PRICES[s],
           setups: ["orb"],
           signal: "BUY",
-          signal_label: "BUY (2R FRAC)",
+          signal_label: "BUY (2R/3R FRAC)",
           signal_color: "jade",
           approved: true,
         })),
@@ -280,8 +328,9 @@
 
   function buildChartCandles(symbol, tf) {
     const sym = (symbol || "TSLA").toUpperCase();
-    const px = PRICES[sym] || 100.0;
-    const prev = Math.round(px * 0.985 * 100) / 100;
+    const { px, orLow, orHigh, entry, stop, risk } = buildOrbGeometry(sym);
+    const { target } = selectViableTarget(sym, entry, stop, risk, 25);
+    const prev = Math.round(px * 0.982 * 100) / 100;
     const candles = [];
     let cur = prev;
     const count = 36;
@@ -296,11 +345,6 @@
       candles.push({ time: nowSec - (count - i) * 300, label: `${i + 1}`, open: o, high: h, low: l, close: c, volume: 25000 + i * 750 });
       cur = c;
     }
-    const orLow = Math.round(px * 0.985 * 100) / 100;
-    const orHigh = Math.round(px * 0.995 * 100) / 100;
-    const entry = Math.round((orHigh + 0.45) * 100) / 100;
-    const stop = Math.round(((orHigh + orLow) / 2) * 100) / 100;
-    const target = Math.round((entry + 2 * (entry - stop)) * 100) / 100;
     return {
       success: true,
       symbol: sym,
@@ -336,7 +380,7 @@
       return jsonResponse({ success: true, pipeline: buildPipeline(url.searchParams.get("symbol"), url.searchParams.get("usd")) });
     }
     if (path === "/api/pipeline/approved") {
-      return jsonResponse({ success: true, approved_stocks: buildPipeline("TSLA", 25).approved_stocks });
+      return jsonResponse({ success: true, approved_stocks: buildApprovedList(25) });
     }
     if (path === "/api/chart/data") {
       return jsonResponse(buildChartCandles(url.searchParams.get("symbol"), url.searchParams.get("tf")));
@@ -430,7 +474,7 @@
       const px = Number(body.price || PRICES[pos.ticker] || 100);
       const lotCost = pos.lots.reduce((a, l) => a + Number(l.cost || 0), 0);
       const basis = Math.round((lotCost / pos.shares) * sellSh * 100) / 100;
-      const fee = calcTigerNZFee("SELL", sellSh, px, true).total_fee;
+      const fee = calcTigerNZFee("SELL", sellSh, px, false).total_fee;
       const netProc = Math.round((sellSh * px - fee) * 100) / 100;
       const pnl = Math.round((netProc - basis) * 100) / 100;
       store.cash = Math.round((store.cash + netProc) * 100) / 100;

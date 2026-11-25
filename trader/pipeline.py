@@ -169,38 +169,29 @@ def get_all_11_skills_approved_stocks() -> List[Dict[str, Any]]:
         if risk <= 0:
             continue
 
-        # Prefer 1R only if profitable after Tiger NZ round-trip fees; otherwise 2R
-        target_1r = round(entry_p + risk, 2)
-        target_2r = round(entry_p + (2.0 * risk), 2)
-        tiger_eval = evaluate_tiger_nz_order_plan(
-            symbol=sym,
-            entry_price=entry_p,
-            stop_price=stop_p,
-            target_price=target_1r,
-            target_usd=target_order_usd,
-            max_loss_usd=max_loss_cap,
-            min_net_profit_usd=min_net_profit,
-            fractional_enabled=fractional_enabled,
-        )
-        chosen_target = target_1r
-        chosen_r = 1.0
-        if not tiger_eval["approved"]:
-            tiger_eval_2r = evaluate_tiger_nz_order_plan(
+        # Check 2R (trader-exit skill default) first, then 3R if tight stop needs wider reward to clear Tiger NZ fees
+        tiger_eval = None
+        chosen_target = round(entry_p + (2.0 * risk), 2)
+        chosen_r = 2.0
+        for r_mult in (2.0, 3.0):
+            cand_target = round(entry_p + (r_mult * risk), 2)
+            cand_eval = evaluate_tiger_nz_order_plan(
                 symbol=sym,
                 entry_price=entry_p,
                 stop_price=stop_p,
-                target_price=target_2r,
+                target_price=cand_target,
                 target_usd=target_order_usd,
                 max_loss_usd=max_loss_cap,
                 min_net_profit_usd=min_net_profit,
                 fractional_enabled=fractional_enabled,
             )
-            if tiger_eval_2r["approved"]:
-                tiger_eval = tiger_eval_2r
-                chosen_target = target_2r
-                chosen_r = 2.0
+            if cand_eval["approved"]:
+                tiger_eval = cand_eval
+                chosen_target = cand_target
+                chosen_r = r_mult
+                break
 
-        if not tiger_eval["approved"]:
+        if not tiger_eval or not tiger_eval["approved"]:
             continue
 
         econ = tiger_eval["economics"]
@@ -387,41 +378,39 @@ def run_day_trader_pipeline(
         risk_per_share = round(entry_price * 0.02, 2)
         stop_price = round(entry_price - risk_per_share, 2)
 
-    target_1r = round(entry_price + risk_per_share, 2)
-    target_2r = round(entry_price + (2.0 * risk_per_share), 2)
-    target_r_label = "1R"
-    target_price = target_1r
-
-    # Preview Tiger NZ US$25 fractional rule on 1R first; upgrade to 2R if 1R doesn't clear fees
+    # Preview Tiger NZ US$25 fractional rule: test 2R (skill default), then 3R if tight stop needs wider target to clear fees
     desired_usd = min(budget, max_order_usd, max(1.0, float(usd_amount)))
     if cash < desired_usd and cash >= 1.0:
         desired_usd = cash
 
+    target_r_label = "2R"
+    target_price = round(entry_price + (2.0 * risk_per_share), 2)
     tiger_eval = evaluate_tiger_nz_order_plan(
         symbol=symbol,
         entry_price=entry_price,
         stop_price=stop_price,
-        target_price=target_1r,
+        target_price=target_price,
         target_usd=desired_usd,
         max_loss_usd=max_loss,
         min_net_profit_usd=min_net_profit_usd,
         fractional_enabled=fractional_enabled,
     )
     if not tiger_eval["approved"]:
-        tiger_eval_2r = evaluate_tiger_nz_order_plan(
+        target_3r = round(entry_price + (3.0 * risk_per_share), 2)
+        tiger_eval_3r = evaluate_tiger_nz_order_plan(
             symbol=symbol,
             entry_price=entry_price,
             stop_price=stop_price,
-            target_price=target_2r,
+            target_price=target_3r,
             target_usd=desired_usd,
             max_loss_usd=max_loss,
             min_net_profit_usd=min_net_profit_usd,
             fractional_enabled=fractional_enabled,
         )
-        if tiger_eval_2r["approved"]:
-            tiger_eval = tiger_eval_2r
-            target_price = target_2r
-            target_r_label = "2R"
+        if tiger_eval_3r["approved"]:
+            tiger_eval = tiger_eval_3r
+            target_price = target_3r
+            target_r_label = "3R"
 
     reward_risk_ratio = round((target_price - entry_price) / risk_per_share, 2) if risk_per_share > 0 else 1.0
 

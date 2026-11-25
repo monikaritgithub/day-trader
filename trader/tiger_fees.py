@@ -213,7 +213,7 @@ def preview_round_trip_economics(
     stop_price: float,
     target_price: float,
     min_net_profit_usd: float = 0.05,
-    conservative_regulatory: bool = True
+    conservative_regulatory: bool = False
 ) -> Dict[str, Any]:
     """
     Previews exact buy + sell + regulatory fees and expected net profit at target.
@@ -260,6 +260,10 @@ def preview_round_trip_economics(
     net_loss_at_stop = round(gross_loss_at_stop + stop_round_trip_fee, 2)
     fee_drag_pct = round((round_trip_fee / gross_profit) * 100.0, 1) if gross_profit > 0 else 999.9
     net_rr = round(expected_net_profit / net_loss_at_stop, 2) if net_loss_at_stop > 0 else 0.0
+    breakeven_win_rate_pct = (
+        round((net_loss_at_stop / (expected_net_profit + net_loss_at_stop)) * 100.0, 1)
+        if expected_net_profit > 0 else 100.0
+    )
 
     profitable = (expected_net_profit >= min_net_profit_usd and expected_net_profit > 0)
     if not profitable:
@@ -289,6 +293,7 @@ def preview_round_trip_economics(
         "net_loss_at_stop": net_loss_at_stop,
         "fee_drag_pct": fee_drag_pct,
         "net_reward_risk": net_rr,
+        "breakeven_win_rate_pct": breakeven_win_rate_pct,
         "min_net_profit_usd": min_net_profit_usd,
         "buy_breakdown": buy_fee_info,
         "sell_breakdown": sell_fee_info,
@@ -373,7 +378,7 @@ def evaluate_tiger_nz_order_plan(
         ev = preview_round_trip_economics(
             sym, sh, entry_p, stop_p, target_p,
             min_net_profit_usd=min_net_profit_usd,
-            conservative_regulatory=True
+            conservative_regulatory=False
         )
         if not ev.get("verified"):
             continue
@@ -401,7 +406,7 @@ def evaluate_tiger_nz_order_plan(
     diag = preview_round_trip_economics(
         sym, diag_sh, entry_p, stop_p, target_p,
         min_net_profit_usd=min_net_profit_usd,
-        conservative_regulatory=True
+        conservative_regulatory=False
     )
     diag["within_max_loss"] = (diag.get("net_loss_at_stop", 999.0) <= max_loss_usd + 0.05)
     reason = diag.get("reason", "Trade failed Tiger Brokers NZ fee & profitability check.")

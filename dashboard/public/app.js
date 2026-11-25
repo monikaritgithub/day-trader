@@ -399,7 +399,8 @@ function renderPipeline(p) {
     gateAiVal.textContent = `SEC 8-K Passed (${p.gemini_news.sentiment || 'Bullish'})`;
   }
   if (gateOddsVal && p.timemachine) {
-    gateOddsVal.textContent = `${Number(p.timemachine.target_win_pct || 52).toFixed(1)}% Target First (+1R)`;
+    const rLbl = (p.plan && p.plan.reward_risk) ? `${Math.round(Number(p.plan.reward_risk))}R` : "2R";
+    gateOddsVal.textContent = `${Number(p.timemachine.target_win_pct || 52).toFixed(1)}% Target First (${rLbl})`;
   }
 
   // Update Tiger Brokers NZ Execution Specs
@@ -464,8 +465,10 @@ function renderPipeline(p) {
   }
   if (summaryEl) {
     const stopVal = p.plan ? p.plan.stop : (p.curr_price * 0.98);
-    const targetVal = p.plan ? p.plan.target : (p.curr_price * 1.02);
-    summaryEl.textContent = `Price closed above the 15m opening range high with risk-to-reward ≥ 1.0. Stop placed at midpoint ($${Number(stopVal).toFixed(2)}) limits risk to $${Number(p.sizing.max_loss).toFixed(2)} USD at $${state.usdAmount.toFixed(2)} USD sizing. 1R Target set at $${Number(targetVal).toFixed(2)}.`;
+    const targetVal = p.plan ? p.plan.target : (p.curr_price * 1.04);
+    const rrVal = (p.plan && p.plan.reward_risk) ? p.plan.reward_risk : 2.0;
+    const feeTxt = p.tiger_economics ? ` Est. Tiger NZ round-trip fee: $${Number(p.tiger_economics.round_trip_fee || 0).toFixed(2)}, expected net: ${Number(p.tiger_economics.expected_net_profit || 0) >= 0 ? '+' : ''}$${Number(p.tiger_economics.expected_net_profit || 0).toFixed(2)}.` : "";
+    summaryEl.textContent = `15m ORB setup with ${Number(rrVal).toFixed(1)}:1 R:R. Stop at midpoint ($${Number(stopVal).toFixed(2)}) limits risk to $${Number(p.sizing ? p.sizing.max_loss : 0).toFixed(2)} USD. ${Number(rrVal).toFixed(0)}R Target set at $${Number(targetVal).toFixed(2)}.${feeTxt}`;
   }
 
   // 4 Pillars
@@ -589,29 +592,41 @@ function renderPipeline(p) {
   const apprvCountBadge = document.getElementById("approved-stocks-count-badge");
   if (apprvContainer && p.approved_stocks) {
     if (apprvCountBadge) apprvCountBadge.textContent = `${p.approved_stocks.length} Approved`;
-    apprvContainer.innerHTML = p.approved_stocks.map(st => `
+    if (p.approved_stocks.length === 0) {
+      apprvContainer.innerHTML = `<div class="empty-feed compact"><p>No setups currently pass all 11 skills + Tiger NZ round-trip fee profitability. Try 2R/3R targets or wait for market open (03:30 AM NZDT).</p></div>`;
+    } else {
+      const fmtPx = (v) => Number.isFinite(Number(v)) ? `$${Number(v).toFixed(2)}` : "--";
+      apprvContainer.innerHTML = p.approved_stocks.map(st => {
+        const tgtLabel = st.target_r ? `${Math.round(Number(st.target_r))}R` : "Target";
+        const netBadge = Number.isFinite(Number(st.expected_net_profit))
+          ? `<span>Net <strong>${Number(st.expected_net_profit) >= 0 ? '+' : ''}$${Number(st.expected_net_profit).toFixed(2)}</strong> (Fee $${Number(st.round_trip_fee || 0).toFixed(2)})</span>`
+          : "";
+        return `
       <div class="rh-stock-row ${st.symbol === state.activeSymbol ? 'active-row' : ''}" onclick="selectTicker('${st.symbol}'); switchPage('page-trade');">
         <div class="rh-sr-left">
           <div class="rh-sr-sym-line">
             <span class="rh-sr-symbol">${st.symbol}</span>
-            <span class="rh-sr-tag">11/11 Passed</span>
+            <span class="rh-sr-tag">${st.skills_passed || 11}/${st.skills_total || 11} Passed</span>
           </div>
-          <span class="rh-sr-name">${st.name}</span>
+          <span class="rh-sr-name">${st.name || st.symbol}</span>
           <div class="rh-sr-params tabular">
-            <span>Entry <strong>$${Number(st.entry).toFixed(2)}</strong></span>
-            <span>Stop <strong>$${Number(st.stop).toFixed(2)}</strong></span>
-            <span>1R <strong>$${Number(st.target).toFixed(2)}</strong></span>
+            <span>Entry <strong>${fmtPx(st.entry)}</strong></span>
+            <span>Stop <strong>${fmtPx(st.stop)}</strong></span>
+            <span>${tgtLabel} <strong>${fmtPx(st.target)}</strong></span>
+            ${netBadge}
           </div>
         </div>
         <div class="rh-sr-right">
-          <span class="rh-sr-price tabular">$${Number(st.price).toFixed(2)}</span>
-          <span class="rh-sr-pct positive tabular">+${Number(st.change_pct).toFixed(2)}%</span>
+          <span class="rh-sr-price tabular">${fmtPx(st.price)}</span>
+          <span class="rh-sr-pct positive tabular">+${Number.isFinite(Number(st.change_pct)) ? Number(st.change_pct).toFixed(2) : '0.00'}%</span>
           <button class="btn-rh-row-action" onclick="event.stopPropagation(); selectTicker('${st.symbol}'); switchPage('page-trade');">
             Trade $25
           </button>
         </div>
       </div>
-    `).join("");
+    `;
+      }).join("");
+    }
   }
 
   // Render 11-Skill Quantitative Audit Checklist
