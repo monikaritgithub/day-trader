@@ -1,0 +1,22 @@
+{
+  "created_by": "trader-entry",
+  "symbol": "ANT",
+  "setup": "orb",
+  "side": "buy",
+  "date": "2026-11-24",
+  "status": "expired",
+  "time": null,
+  "bar_start": null,
+  "bar_index": null,
+  "price": null,
+  "level": 83.06,
+  "interval": "5m",
+  "opening_range": {
+    "high": 83.06,
+    "low": 79.42,
+    "minutes": 15
+  },
+  "source": "yahoo",
+  "checked_at": "2026-11-25T04:58:22Z",
+  "reason": "no close above the range high $83.06 by 15:30, the last time for a new entry"
+}

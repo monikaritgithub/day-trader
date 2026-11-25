@@ -1,0 +1,142 @@
+{
+  "as_of": "2026-11-25T05:13:46Z",
+  "source": "yahoo",
+  "note": "Delayed quotes for alerts and sizing checks. Your broker's price is the one that fills. detail.fetched is when each price was read.",
+  "prices": {
+    "SOFI": 12.86,
+    "NVDA": 155.38,
+    "AAPL": 354.07,
+    "TSLA": 384.68,
+    "PLTR": 161.18,
+    "INTC": 59.66,
+    "GME": 27.48,
+    "SMCI": 24.53,
+    "COIN": 108.78,
+    "RIVN": 11.22,
+    "TSM": 363.6,
+    "BABA": 86.04,
+    "AMD": 413.27,
+    "MSFT": 496.13,
+    "AMZN": 255.39,
+    "META": 597.6,
+    "GOOGL": 282.1,
+    "MARA": 5.58,
+    "ANT": 81.905
+  },
+  "detail": {
+    "SOFI": {
+      "prev_close": 13.09,
+      "time": "2026-11-24T21:00:00Z",
+      "source": "yahoo",
+      "fetched": "2026-11-25T05:13:46Z"
+    },
+    "NVDA": {
+      "prev_close": 165.05,
+      "time": "2026-11-24T21:00:01Z",
+      "source": "yahoo",
+      "fetched": "2026-11-25T04:59:59Z"
+    },
+    "AAPL": {
+      "prev_close": 349.08,
+      "time": "2026-11-24T21:00:01Z",
+      "source": "yahoo",
+      "fetched": "2026-11-25T04:59:59Z"
+    },
+    "TSLA": {
+      "prev_close": 385.46,
+      "time": "2026-11-24T21:00:01Z",
+      "source": "yahoo",
+      "fetched": "2026-11-25T05:13:46Z"
+    },
+    "PLTR": {
+      "prev_close": 159.36,
+      "time": "2026-11-24T21:00:01Z",
+      "source": "yahoo",
+      "fetched": "2026-11-25T05:13:46Z"
+    },
+    "INTC": {
+      "prev_close": 51.28,
+      "time": "2026-11-23T21:00:01Z",
+      "source": "yahoo",
+      "fetched": "2026-11-24T05:10:28Z"
+    },
+    "GME": {
+      "prev_close": 27.3,
+      "time": "2026-11-24T21:00:03Z",
+      "source": "yahoo",
+      "fetched": "2026-11-25T05:13:46Z"
+    },
+    "SMCI": {
+      "prev_close": 21.65,
+      "time": "2026-11-23T21:00:00Z",
+      "source": "yahoo",
+      "fetched": "2026-11-24T05:29:44Z"
+    },
+    "COIN": {
+      "prev_close": 101.97,
+      "time": "2026-11-23T21:00:01Z",
+      "source": "yahoo",
+      "fetched": "2026-11-24T05:29:28Z"
+    },
+    "RIVN": {
+      "prev_close": 10.33,
+      "time": "2026-11-23T21:00:00Z",
+      "source": "yahoo",
+      "fetched": "2026-11-24T05:29:16Z"
+    },
+    "TSM": {
+      "prev_close": 318.71,
+      "time": "2026-11-23T21:00:02Z",
+      "source": "yahoo",
+      "fetched": "2026-11-24T05:13:07Z"
+    },
+    "BABA": {
+      "prev_close": 81.08,
+      "time": "2026-11-23T21:02:53Z",
+      "source": "yahoo",
+      "fetched": "2026-11-24T05:28:50Z"
+    },
+    "AMD": {
+      "prev_close": 453.46,
+      "time": "2026-11-24T21:00:01Z",
+      "source": "yahoo",
+      "fetched": "2026-11-25T04:59:59Z"
+    },
+    "MSFT": {
+      "prev_close": 492.5,
+      "time": "2026-11-24T21:00:01Z",
+      "source": "yahoo",
+      "fetched": "2026-11-25T04:59:59Z"
+    },
+    "AMZN": {
+      "prev_close": 246.82,
+      "time": "2026-11-23T21:00:01Z",
+      "source": "yahoo",
+      "fetched": "2026-11-24T05:23:13Z"
+    },
+    "META": {
+      "prev_close": 560.84,
+      "time": "2026-11-23T21:00:01Z",
+      "source": "yahoo",
+      "fetched": "2026-11-24T05:23:13Z"
+    },
+    "GOOGL": {
+      "prev_close": 265.29,
+      "time": "2026-11-23T21:00:01Z",
+      "source": "yahoo",
+      "fetched": "2026-11-24T05:23:13Z"
+    },
+    "MARA": {
+      "prev_close": 5.085,
+      "time": "2026-11-23T21:00:01Z",
+      "source": "yahoo",
+      "fetched": "2026-11-24T05:23:13Z"
+    },
+    "ANT": {
+      "prev_close": 87.64,
+      "time": "2026-11-24T21:00:01Z",
+      "source": "yahoo",
+      "fetched": "2026-11-25T04:59:59Z"
+    }
+  }
+}

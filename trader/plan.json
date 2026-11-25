@@ -1,0 +1,28 @@
+{
+  "created_by": "trader-exit",
+  "symbol": "ANT",
+  "side": "buy",
+  "date": "2026-11-24",
+  "setup": "orb",
+  "entry": 83.84,
+  "entry_time": "10:00 AM",
+  "entry_bar": null,
+  "interval": "5m",
+  "opening_range": {
+    "high": 83.06,
+    "low": 79.42,
+    "minutes": 15
+  },
+  "stop": 81.24,
+  "stop_rule": "or_mid",
+  "stop_label": "opening-range midpoint",
+  "target": 86.44,
+  "target_r": 1.0,
+  "target_label": "1R (one times the risk)",
+  "risk_per_share": 2.6,
+  "reward_risk": 1.0,
+  "flat_by": "15:55",
+  "stop_detail": "($83.06 + $79.42) / 2 = $81.24",
+  "created_at": "2026-11-25T04:58:22Z",
+  "note": "A stop is a plan, not a guarantee: a gap or a fast market can fill past it."
+}

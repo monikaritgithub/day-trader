@@ -1,0 +1,25 @@
+# Environment & Secrets (NEVER commit live API keys)
+.env
+*.pem
+*.key
+
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+*.egg-info/
+
+# Runtime caches, personal config & tunnel state
+trader/config.json
+trader/state/pipeline_cache.json
+trader/state/news.json
+trader/state/current_tunnel_url.txt
+trader/state/autotrader_state.json
+trader/state/pelosi.json
+trader/state/ptr-pdfs/
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+*.log

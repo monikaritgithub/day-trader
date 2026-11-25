@@ -1,0 +1,47 @@
+{
+  "date": "2026-11-24",
+  "now_new_york": "2026-11-24 23:58",
+  "paper": true,
+  "results": [
+    {
+      "index": 1,
+      "symbol": "ANT",
+      "side": "buy",
+      "kind": "entry",
+      "amount": "0.2982 shares",
+      "value_usd": 25.0,
+      "entry_ref": 83.84,
+      "entry_ref_from": "limit",
+      "stop": 81.24,
+      "target": 86.44,
+      "risk_per_share": 2.6,
+      "max_loss": 0.78,
+      "reward_risk": 1.0,
+      "fingerprint": "b543ecb05afe7d78",
+      "verdict": "BLOCK",
+      "reasons": [
+        "format: a bracket order takes whole shares only, got qty '0.2982'",
+        "window: the market is closed (Tue 2026-11-24 23:58 New York; the session is 09:30 to 16:00)"
+      ],
+      "warnings": [],
+      "info": [
+        "entry 83.84 (the limit price), stop 81.24, target 86.44: risk 2.60 a share",
+        "max loss $0.78 (limit $5), reward:risk 1.00 (min 1)",
+        "today before this: 0 of 3 trades, $0 of $15 daily loss"
+      ]
+    }
+  ],
+  "pass": 0,
+  "block": 1,
+  "warnings": [],
+  "cash_after": 50.06,
+  "today": {
+    "orders_placed": 0,
+    "entries_placed": 0,
+    "loss_at_risk": 0.0,
+    "day_trades_5d": null
+  },
+  "prices_as_of": "2026-11-25T04:58:09Z",
+  "checked_at": "2026-11-25T04:58:23Z",
+  "orders_file": "trader/orders.json"
+}
