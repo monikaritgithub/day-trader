@@ -162,19 +162,20 @@ def get_all_11_skills_approved_stocks() -> List[Dict[str, Any]]:
         if or_high <= 0 or or_low <= 0 or entry_p <= 0:
             continue
 
-        stop_p = round((or_high + or_low) / 2.0, 2)
+        from decimal import Decimal, ROUND_FLOOR, ROUND_HALF_UP
+        stop_p = float(((Decimal(str(or_high)) + Decimal(str(or_low))) / Decimal("2")).quantize(Decimal("0.01"), rounding=ROUND_FLOOR))
         if stop_p >= entry_p:
             continue
-        risk = round(entry_p - stop_p, 2)
-        if risk <= 0:
+        risk = float((Decimal(str(entry_p)) - Decimal(str(stop_p))).quantize(Decimal("0.01")))
+        if risk <= 0 or (risk / entry_p) < 0.0005:
             continue
 
         # Check 2R (trader-exit skill default) first, then 3R if tight stop needs wider reward to clear Tiger NZ fees
         tiger_eval = None
-        chosen_target = round(entry_p + (2.0 * risk), 2)
+        chosen_target = float((Decimal(str(entry_p)) + Decimal("2") * Decimal(str(risk))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
         chosen_r = 2.0
         for r_mult in (2.0, 3.0):
-            cand_target = round(entry_p + (r_mult * risk), 2)
+            cand_target = float((Decimal(str(entry_p)) + Decimal(str(r_mult)) * Decimal(str(risk))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
             cand_eval = evaluate_tiger_nz_order_plan(
                 symbol=sym,
                 entry_price=entry_p,
@@ -368,15 +369,17 @@ def run_day_trader_pipeline(
     if abs(entry_price - curr_price) < 0.01:
         entry_price = round(curr_price - 1.18, 2)
 
-    # 3. Calculate Midpoint Stop & Target (1R vs 2R evaluated against Tiger NZ fees)
-    stop_price = round((or_high + or_low) / 2.0, 2)
+    # 3. Calculate Midpoint Stop (rounded DOWN to cent) & Target (2R/3R rounded HALF_UP per trader-exit)
+    from decimal import Decimal, ROUND_FLOOR, ROUND_HALF_UP
+    stop_dec = ((Decimal(str(or_high)) + Decimal(str(or_low))) / Decimal("2")).quantize(Decimal("0.01"), rounding=ROUND_FLOOR)
+    stop_price = float(stop_dec)
     if stop_price >= entry_price:
-        stop_price = round(entry_price * 0.98, 2)
+        stop_price = float((Decimal(str(entry_price)) * Decimal("0.98")).quantize(Decimal("0.01"), rounding=ROUND_FLOOR))
 
-    risk_per_share = round(entry_price - stop_price, 2)
+    risk_per_share = float((Decimal(str(entry_price)) - Decimal(str(stop_price))).quantize(Decimal("0.01")))
     if risk_per_share <= 0:
-        risk_per_share = round(entry_price * 0.02, 2)
-        stop_price = round(entry_price - risk_per_share, 2)
+        risk_per_share = float((Decimal(str(entry_price)) * Decimal("0.02")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+        stop_price = float((Decimal(str(entry_price)) - Decimal(str(risk_per_share))).quantize(Decimal("0.01"), rounding=ROUND_FLOOR))
 
     # Preview Tiger NZ US$25 fractional rule: test 2R (skill default), then 3R if tight stop needs wider target to clear fees
     desired_usd = min(budget, max_order_usd, max(1.0, float(usd_amount)))
@@ -384,7 +387,7 @@ def run_day_trader_pipeline(
         desired_usd = cash
 
     target_r_label = "2R"
-    target_price = round(entry_price + (2.0 * risk_per_share), 2)
+    target_price = float((Decimal(str(entry_price)) + Decimal("2") * Decimal(str(risk_per_share))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
     tiger_eval = evaluate_tiger_nz_order_plan(
         symbol=symbol,
         entry_price=entry_price,
@@ -396,7 +399,7 @@ def run_day_trader_pipeline(
         fractional_enabled=fractional_enabled,
     )
     if not tiger_eval["approved"]:
-        target_3r = round(entry_price + (3.0 * risk_per_share), 2)
+        target_3r = float((Decimal(str(entry_price)) + Decimal("3") * Decimal(str(risk_per_share))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
         tiger_eval_3r = evaluate_tiger_nz_order_plan(
             symbol=symbol,
             entry_price=entry_price,
@@ -450,12 +453,13 @@ def run_day_trader_pipeline(
         }
         write_json_safe(TRADER_DIR / "plan.json", plan_doc)
 
-    # 4. Monte Carlo Time Machine Replay (10,000 replays)
+    # 4. Monte Carlo Time Machine Replay (10,000 replays up to flat_by)
     replays_count = 10000
+    flat_by_str = str(cfg.get("flat_by", "15:55"))
     timemachine_doc = read_json_safe(TRADER_DIR / "timemachine.json")
     try:
         subprocess.run(
-            [sys.executable, "trader-timemachine/timemachine.py", "run", "--replays", str(replays_count), "--seed", "19", "--write"],
+            [sys.executable, "trader-timemachine/timemachine.py", "run", "--until", flat_by_str, "--replays", str(replays_count), "--seed", "19", "--write"],
             cwd=str(REPO_DIR), capture_output=True, timeout=15
         )
         timemachine_doc = read_json_safe(TRADER_DIR / "timemachine.json")

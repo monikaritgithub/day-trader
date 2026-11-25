@@ -316,7 +316,7 @@ function updatePrices(pricesData) {
 async function loadPipelineData(symbol, usdAmount, force = false) {
   symbol = (symbol || state.activeSymbol || "TSLA").trim().toUpperCase();
   state.activeSymbol = symbol;
-  state.usdAmount = Math.min(100.0, Math.max(1.0, parseFloat(usdAmount || state.usdAmount || 25.0)));
+  state.usdAmount = Math.min(200.0, Math.max(1.0, parseFloat(usdAmount || state.usdAmount || 25.0)));
 
   // Update header symbol & name immediately
   const symEl = document.getElementById("active-symbol");
@@ -403,19 +403,58 @@ function renderPipeline(p) {
     gateOddsVal.textContent = `${Number(p.timemachine.target_win_pct || 52).toFixed(1)}% Target First (${rLbl})`;
   }
 
-  // Update Tiger Brokers NZ Execution Specs
+  // Update Tiger Brokers NZ Execution Specs & Exact Net Account Payout
   const tigerSym = document.getElementById("tiger-spec-sym");
   const tigerEntry = document.getElementById("tiger-spec-entry");
   const tigerStop = document.getElementById("tiger-spec-stop");
   const tigerTarget = document.getElementById("tiger-spec-target");
+  const tigerTargetLbl = document.getElementById("tiger-spec-target-label");
   const tigerShares = document.getElementById("tiger-spec-shares");
+  const tigerRtFee = document.getElementById("tiger-spec-rt-fee");
+  const tigerGross = document.getElementById("tiger-spec-gross-profit");
+  const tigerNetAdded = document.getElementById("tiger-spec-net-added");
+  const tigerNewBal = document.getElementById("tiger-spec-new-balance");
+  const tigerStopImpact = document.getElementById("tiger-spec-stop-impact");
   const tigerCopyBtn = document.getElementById("btn-copy-tiger-order");
 
+  const rMultVal = (p.plan && p.plan.reward_risk) ? Math.round(Number(p.plan.reward_risk)) : 2;
   if (tigerSym) tigerSym.textContent = p.symbol;
   if (tigerEntry && p.plan) tigerEntry.textContent = `$${Number(p.plan.entry || p.curr_price).toFixed(2)}`;
   if (tigerStop && p.plan) tigerStop.textContent = `$${Number(p.plan.stop || p.curr_price * 0.98).toFixed(2)}`;
-  if (tigerTarget && p.plan) tigerTarget.textContent = `$${Number(p.plan.target || p.curr_price * 1.02).toFixed(2)}`;
-  if (tigerShares && p.sizing) tigerShares.textContent = `${Number(p.sizing.shares || 0.0649).toFixed(4)} sh ($${state.usdAmount.toFixed(2)})`;
+  if (tigerTargetLbl) tigerTargetLbl.textContent = `${rMultVal}R Target`;
+  if (tigerTarget && p.plan) tigerTarget.textContent = `$${Number(p.plan.target || p.curr_price * 1.04).toFixed(2)}`;
+  if (tigerShares && p.sizing) {
+    const shQty = Number(p.sizing.shares || 0);
+    const shCost = Number(p.sizing.cost || p.sizing.usd_amount || state.usdAmount);
+    tigerShares.textContent = `${shQty.toFixed(4)} sh ($${shCost.toFixed(2)} ${shQty < 1 ? "• Fractional" : "• Whole"})`;
+  }
+
+  const econ = p.tiger_economics || {};
+  const buyFee = Number(econ.buy_fee !== undefined ? econ.buy_fee : 0.25);
+  const sellFee = Number(econ.sell_fee !== undefined ? econ.sell_fee : 0.25);
+  const rtFee = Number(econ.round_trip_fee !== undefined ? econ.round_trip_fee : (buyFee + sellFee));
+  const grossProfit = Number(econ.gross_profit !== undefined ? econ.gross_profit : (p.plan && p.sizing ? Number(p.sizing.shares) * (Number(p.plan.target) - Number(p.plan.entry)) : 0));
+  const netProfit = Number(econ.expected_net_profit !== undefined ? econ.expected_net_profit : (grossProfit - rtFee));
+  const stopLossTotal = Number(econ.net_loss_at_stop !== undefined ? econ.net_loss_at_stop : ((p.sizing ? Number(p.sizing.max_loss) : 0) + rtFee));
+  const beWin = Number(econ.breakeven_win_rate_pct !== undefined ? econ.breakeven_win_rate_pct : (netProfit > 0 ? (stopLossTotal / (netProfit + stopLossTotal)) * 100 : 100));
+  const currCashVal = Number((p.sizing && p.sizing.available_cash !== undefined) ? p.sizing.available_cash : (state.snapshot && state.snapshot.portfolio ? state.snapshot.portfolio.cash : 200.0));
+  const newBalance = currCashVal + netProfit;
+
+  if (tigerRtFee) tigerRtFee.textContent = `-$${rtFee.toFixed(2)} USD (Buy $${buyFee.toFixed(2)} + Sell $${sellFee.toFixed(2)})`;
+  if (tigerGross) tigerGross.textContent = `${grossProfit >= 0 ? '+' : '-'}$${Math.abs(grossProfit).toFixed(2)} USD`;
+  if (tigerNetAdded) {
+    tigerNetAdded.textContent = `${netProfit >= 0 ? '+' : '-'}$${Math.abs(netProfit).toFixed(2)} USD`;
+    tigerNetAdded.className = `ts-val ${netProfit > 0 ? 'text-rh-green' : 'text-coral'}`;
+  }
+  if (tigerNewBal) {
+    tigerNewBal.textContent = `$${newBalance.toFixed(2)} USD (from $${currCashVal.toFixed(2)})`;
+    tigerNewBal.className = `ts-val ${netProfit > 0 ? 'text-rh-green' : 'text-coral'}`;
+  }
+  if (tigerStopImpact) {
+    tigerStopImpact.textContent = `-$${stopLossTotal.toFixed(2)} USD (Break-Even Win Rate: ${beWin.toFixed(1)}%)`;
+  }
+  const guideSym = document.getElementById("tiger-guide-sym");
+  if (guideSym) guideSym.textContent = p.symbol;
 
   if (tigerCopyBtn) {
     tigerCopyBtn.onclick = () => {
@@ -547,7 +586,10 @@ function renderPipeline(p) {
   const specEntry = document.getElementById("order-spec-entry");
   const specStop = document.getElementById("order-spec-stop");
   const specTarget = document.getElementById("order-spec-target");
+  const specTargetLbl = document.getElementById("order-spec-target-label");
   const specMaxLoss = document.getElementById("order-spec-maxloss");
+  const specFee = document.getElementById("order-spec-fee");
+  const specNetProfit = document.getElementById("order-spec-net-profit");
   const calcShares = document.getElementById("demo-calc-shares");
   const remUsd = document.getElementById("demo-usd-remaining");
   const buyBtnLbl = document.getElementById("demo-buy-label");
@@ -555,7 +597,13 @@ function renderPipeline(p) {
   if (p.plan) {
     if (specEntry) specEntry.textContent = `$${Number(p.plan.entry).toFixed(2)}`;
     if (specStop) specStop.textContent = `$${Number(p.plan.stop).toFixed(2)}`;
+    if (specTargetLbl) specTargetLbl.textContent = `Take-Profit (${rMultVal}R Target):`;
     if (specTarget) specTarget.textContent = `$${Number(p.plan.target).toFixed(2)}`;
+  }
+  if (specFee) specFee.textContent = `-$${rtFee.toFixed(2)} USD`;
+  if (specNetProfit) {
+    specNetProfit.textContent = `${netProfit >= 0 ? '+' : '-'}$${Math.abs(netProfit).toFixed(2)} USD`;
+    specNetProfit.className = `spec-val font-bold ${netProfit > 0 ? 'text-rh-green' : 'text-coral'}`;
   }
   if (p.sizing) {
     if (specMaxLoss) specMaxLoss.textContent = `-$${Number(p.sizing.max_loss).toFixed(2)} USD`;
@@ -690,16 +738,23 @@ function drawExchangeChart(symbol, plan, entry, pipeline) {
   loadAndDrawChart(symbol, state.activeTimeframe || "1D", plan, entry, pipeline);
 }
 
-function renderDynamicChart(data, plan = null, entry = null, pipeline = null) {
+function renderDynamicChart(data, plan = null, entry = null, pipeline = null, hoverIdx = -1) {
   const canvas = document.getElementById("exchange-candlestick-canvas");
   if (!canvas) return;
   const container = canvas.parentElement;
-  if (container && container.clientWidth > 100) {
-    canvas.width = container.clientWidth;
+  const dpr = Math.min(window.devicePixelRatio || 1, 3);
+  const cssW = (container && container.clientWidth > 100) ? container.clientWidth : 850;
+  const cssH = 300;
+  if (canvas.width !== Math.round(cssW * dpr) || canvas.height !== Math.round(cssH * dpr)) {
+    canvas.width = Math.round(cssW * dpr);
+    canvas.height = Math.round(cssH * dpr);
+    canvas.style.width = `${cssW}px`;
+    canvas.style.height = `${cssH}px`;
   }
   const ctx = canvas.getContext("2d");
-  const w = canvas.width;
-  const h = canvas.height;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const w = cssW;
+  const h = cssH;
 
   const isLight = document.documentElement.getAttribute("data-theme") !== "dark";
 
@@ -716,8 +771,11 @@ function renderDynamicChart(data, plan = null, entry = null, pipeline = null) {
   const levels = data.levels || {};
 
   let entryPrice = (plan && plan.entry) ? Number(plan.entry) : (levels.entry || currentPrice * 0.998);
-  let stopPrice = (plan && plan.stop) ? Number(plan.stop) : (levels.stop || entryPrice - 1.50);
-  let targetPrice = (plan && plan.target) ? Number(plan.target) : (levels.target || entryPrice + 1.50);
+  let stopPrice = (plan && plan.stop) ? Number(plan.stop) : (levels.stop || entryPrice * 0.98);
+  let targetPrice = (plan && plan.target) ? Number(plan.target) : (levels.target || entryPrice * 1.04);
+  let orHigh = (entry && entry.or_high) ? Number(entry.or_high) : (levels.or_high || null);
+  let orLow = (entry && entry.or_low) ? Number(entry.or_low) : (levels.or_low || null);
+  const rLabel = (plan && plan.reward_risk) ? `${Math.round(Number(plan.reward_risk))}R` : "2R";
 
   // Update Legend Labels
   const lblEntry = document.getElementById("legend-entry");
@@ -727,18 +785,36 @@ function renderDynamicChart(data, plan = null, entry = null, pipeline = null) {
 
   if (lblEntry) lblEntry.textContent = `Entry: $${entryPrice.toFixed(2)}`;
   if (lblStop) lblStop.textContent = `Stop: $${stopPrice.toFixed(2)}`;
-  if (lblTarget) lblTarget.textContent = `1R Target: $${targetPrice.toFixed(2)}`;
+  if (lblTarget) lblTarget.textContent = `${rLabel} Target: $${targetPrice.toFixed(2)}`;
   if (tickerLbl) tickerLbl.textContent = `${data.symbol} • ${data.timeframe} Live Dynamic Feed`;
 
+  // Compute VWAP series across visible candles
+  const vwapSeries = [];
+  let cumPV = 0;
+  let cumV = 0;
+  for (let i = 0; i < candles.length; i++) {
+    const c = candles[i];
+    const tp = (c.high + c.low + c.close) / 3;
+    const vol = Math.max(1, c.volume || 1);
+    cumPV += tp * vol;
+    cumV += vol;
+    vwapSeries.push(cumPV / cumV);
+  }
+
   // Compute price bounds
-  const prices = candles.flatMap(c => [c.high, c.low]).concat([entryPrice, stopPrice, targetPrice, prevClose]);
-  const minP = Math.min(...prices) * 0.998;
-  const maxP = Math.max(...prices) * 1.002;
+  const pricePoints = candles.flatMap(c => [c.high, c.low]).concat([entryPrice, stopPrice, targetPrice, prevClose]);
+  if (orHigh) pricePoints.push(orHigh);
+  if (orLow) pricePoints.push(orLow);
+  const rawMin = Math.min(...pricePoints);
+  const rawMax = Math.max(...pricePoints);
+  const padSpan = Math.max(0.05, (rawMax - rawMin) * 0.08);
+  const minP = rawMin - padSpan;
+  const maxP = rawMax + padSpan;
   const pRange = Math.max(0.01, maxP - minP);
 
-  const padLeft = 8;
-  const padRight = 75; // Right price axis
-  const padTop = 16;
+  const padLeft = 10;
+  const padRight = 84;
+  const padTop = 22;
   const padBottom = 26;
   const chartW = w - padLeft - padRight;
   const chartH = h - padTop - padBottom;
@@ -751,110 +827,122 @@ function renderDynamicChart(data, plan = null, entry = null, pipeline = null) {
   const isPositive = data.is_positive !== undefined ? data.is_positive : (currentPrice >= prevClose);
   const themeColor = isPositive ? "#00c805" : "#ff5000";
 
-  // Horizontal Grid Lines & Price Axis Labels
-  ctx.strokeStyle = isLight ? "#f1f5f9" : "#131b2e";
+  // Horizontal & Vertical Grid Lines
+  ctx.strokeStyle = isLight ? "#f1f5f9" : "#141d30";
   ctx.lineWidth = 1;
-  const gridSteps = 4;
+  const gridSteps = 5;
   for (let s = 0; s <= gridSteps; s++) {
     const p = minP + (pRange * (s / gridSteps));
-    const y = getY(p);
+    const y = Math.round(getY(p)) + 0.5;
     ctx.beginPath();
     ctx.moveTo(padLeft, y);
     ctx.lineTo(w - padRight, y);
     ctx.stroke();
 
-    ctx.fillStyle = isLight ? "#94a3b8" : "#64748b";
-    ctx.font = "10px JetBrains Mono";
+    ctx.fillStyle = isLight ? "#64748b" : "#94a3b8";
+    ctx.font = "10px 'JetBrains Mono', monospace";
     ctx.textAlign = "left";
-    ctx.fillText(`$${p.toFixed(2)}`, w - padRight + 6, y + 3);
+    ctx.fillText(`$${p.toFixed(2)}`, w - padRight + 8, y + 3.5);
   }
 
-  // Prev Close Baseline (Dashed)
+  // 15m Opening Range Shaded Band
+  if (orHigh && orLow && orHigh > orLow) {
+    const yOrH = getY(orHigh);
+    const yOrL = getY(orLow);
+    ctx.fillStyle = isLight ? "rgba(37, 99, 235, 0.06)" : "rgba(56, 189, 248, 0.08)";
+    ctx.fillRect(padLeft, yOrH, chartW, Math.max(2, yOrL - yOrH));
+    ctx.fillStyle = isLight ? "rgba(37, 99, 235, 0.55)" : "rgba(56, 189, 248, 0.65)";
+    ctx.font = "9px 'JetBrains Mono', monospace";
+    ctx.textAlign = "left";
+    ctx.fillText(`15m OR ($${orLow.toFixed(2)}–$${orHigh.toFixed(2)})`, padLeft + 6, Math.max(padTop + 10, yOrH + 11));
+  }
+
+  // Prev Close Baseline
   const prevY = getY(prevClose);
   ctx.strokeStyle = isLight ? "#cbd5e1" : "#334155";
   ctx.lineWidth = 1;
-  ctx.setLineDash([3, 3]);
+  ctx.setLineDash([3, 4]);
   ctx.beginPath();
   ctx.moveTo(padLeft, prevY);
   ctx.lineTo(w - padRight, prevY);
   ctx.stroke();
   ctx.setLineDash([]);
 
-  // Target Line (+1R)
-  const targetY = getY(targetPrice);
-  ctx.strokeStyle = "#00c805";
-  ctx.lineWidth = 1.4;
-  ctx.setLineDash([4, 3]);
-  ctx.beginPath();
-  ctx.moveTo(padLeft, targetY);
-  ctx.lineTo(w - padRight, targetY);
-  ctx.stroke();
-
-  ctx.fillStyle = "#00c805";
-  ctx.fillRect(w - padRight + 2, targetY - 9, padRight - 6, 18);
-  ctx.fillStyle = "#ffffff";
-  ctx.font = "bold 9.5px JetBrains Mono";
-  ctx.fillText(`+1R ${targetPrice.toFixed(2)}`, w - padRight + 5, targetY + 3);
-
-  // Stop Line
-  const stopY = getY(stopPrice);
-  ctx.strokeStyle = "#ff5000";
-  ctx.lineWidth = 1.4;
-  ctx.beginPath();
-  ctx.moveTo(padLeft, stopY);
-  ctx.lineTo(w - padRight, stopY);
-  ctx.stroke();
-
-  ctx.fillStyle = "#ff5000";
-  ctx.fillRect(w - padRight + 2, stopY - 9, padRight - 6, 18);
-  ctx.fillStyle = "#ffffff";
-  ctx.font = "bold 9.5px JetBrains Mono";
-  ctx.fillText(`STOP ${stopPrice.toFixed(2)}`, w - padRight + 5, stopY + 3);
-
-  // Entry Line
-  const entryY = getY(entryPrice);
-  const entryCol = isLight ? "#2563eb" : "#38bdf8";
-  ctx.strokeStyle = entryCol;
-  ctx.lineWidth = 1.2;
-  ctx.setLineDash([2, 2]);
-  ctx.beginPath();
-  ctx.moveTo(padLeft, entryY);
-  ctx.lineTo(w - padRight, entryY);
-  ctx.stroke();
-  ctx.setLineDash([]);
-
-  ctx.fillStyle = entryCol;
-  ctx.fillRect(w - padRight + 2, entryY - 9, padRight - 6, 18);
-  ctx.fillStyle = "#ffffff";
-  ctx.font = "bold 9.5px JetBrains Mono";
-  ctx.fillText(`ENTRY ${entryPrice.toFixed(2)}`, w - padRight + 5, entryY + 3);
-
-  // Volume Bars at Bottom
+  // Volume Histogram (Bottom 18% of chart)
   const maxVol = Math.max(...candles.map(c => c.volume || 1), 100);
-  const volH = 32;
+  const volMaxH = chartH * 0.18;
   candles.forEach((c, idx) => {
     const x = getX(idx);
-    const vH = ((c.volume || 0) / maxVol) * volH;
+    const vH = ((c.volume || 0) / maxVol) * volMaxH;
     const isBull = c.close >= c.open;
-    ctx.fillStyle = isBull ? "rgba(0, 200, 5, 0.18)" : "rgba(255, 80, 0, 0.18)";
-    const barW = Math.max(2, (chartW / totalBars) * 0.7);
+    ctx.fillStyle = isBull ? "rgba(0, 200, 5, 0.16)" : "rgba(255, 80, 0, 0.16)";
+    const barW = Math.max(2, (chartW / totalBars) * 0.68);
     ctx.fillRect(x - barW / 2, padTop + chartH - vH, barW, vH);
   });
 
+  // VWAP Overlay Curve (Gold / Amber)
+  ctx.strokeStyle = isLight ? "rgba(217, 119, 6, 0.75)" : "rgba(251, 191, 36, 0.75)";
+  ctx.lineWidth = 1.4;
+  ctx.setLineDash([5, 3]);
+  ctx.beginPath();
+  vwapSeries.forEach((vp, idx) => {
+    const x = getX(idx);
+    const y = getY(vp);
+    if (idx === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Price Levels with Anti-Overlap Right-Axis Pills
+  const levelSpecs = [
+    { y: getY(targetPrice), color: "#00c805", label: `${rLabel} ${targetPrice.toFixed(2)}`, dash: [4, 3] },
+    { y: getY(entryPrice), color: isLight ? "#2563eb" : "#38bdf8", label: `IN ${entryPrice.toFixed(2)}`, dash: [2, 2] },
+    { y: getY(stopPrice), color: "#ff5000", label: `SL ${stopPrice.toFixed(2)}`, dash: [] },
+  ];
+  levelSpecs.forEach(lv => {
+    ctx.strokeStyle = lv.color;
+    ctx.lineWidth = 1.3;
+    ctx.setLineDash(lv.dash);
+    ctx.beginPath();
+    ctx.moveTo(padLeft, lv.y);
+    ctx.lineTo(w - padRight, lv.y);
+    ctx.stroke();
+  });
+  ctx.setLineDash([]);
+
+  // Resolve right-axis pill collisions cleanly
+  const sortedPills = [...levelSpecs].sort((a, b) => a.y - b.y);
+  for (let i = 1; i < sortedPills.length; i++) {
+    if (sortedPills[i].y - sortedPills[i - 1].y < 19) {
+      sortedPills[i].y = sortedPills[i - 1].y + 19;
+    }
+  }
+  sortedPills.forEach(lv => {
+    const pillY = Math.max(padTop - 8, Math.min(padTop + chartH - 10, lv.y));
+    ctx.fillStyle = lv.color;
+    ctx.beginPath();
+    ctx.roundRect(w - padRight + 4, pillY - 9, padRight - 8, 17, 4);
+    ctx.fill();
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "bold 9.5px 'JetBrains Mono', monospace";
+    ctx.textAlign = "left";
+    ctx.fillText(lv.label, w - padRight + 8, pillY + 3);
+  });
+
   if (isLineMode) {
-    // Smooth Robinhood Line Curve with Gradient Glow
+    // Smooth Robinhood Line Curve with Crisp Gradient
     const points = candles.map((c, idx) => ({ x: getX(idx), y: getY(c.close) }));
     const bottomY = padTop + chartH;
 
-    // Translucent gradient fill beneath the curve
     const grad = ctx.createLinearGradient(0, padTop, 0, bottomY);
     if (isPositive) {
       grad.addColorStop(0, "rgba(0, 200, 5, 0.28)");
-      grad.addColorStop(0.65, "rgba(0, 200, 5, 0.08)");
+      grad.addColorStop(0.7, "rgba(0, 200, 5, 0.06)");
       grad.addColorStop(1, "rgba(0, 200, 5, 0.0)");
     } else {
       grad.addColorStop(0, "rgba(255, 80, 0, 0.28)");
-      grad.addColorStop(0.65, "rgba(255, 80, 0, 0.08)");
+      grad.addColorStop(0.7, "rgba(255, 80, 0, 0.06)");
       grad.addColorStop(1, "rgba(255, 80, 0, 0.0)");
     }
 
@@ -862,7 +950,6 @@ function renderDynamicChart(data, plan = null, entry = null, pipeline = null) {
     ctx.beginPath();
     ctx.moveTo(points[0].x, bottomY);
     ctx.lineTo(points[0].x, points[0].y);
-
     for (let i = 0; i < points.length - 1; i++) {
       const xc = (points[i].x + points[i + 1].x) / 2;
       const yc = (points[i].y + points[i + 1].y) / 2;
@@ -874,9 +961,8 @@ function renderDynamicChart(data, plan = null, entry = null, pipeline = null) {
     ctx.closePath();
     ctx.fill();
 
-    // Smooth Neon Stroke
     ctx.strokeStyle = themeColor;
-    ctx.lineWidth = 2.8;
+    ctx.lineWidth = 2.6;
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
     ctx.beginPath();
@@ -889,24 +975,22 @@ function renderDynamicChart(data, plan = null, entry = null, pipeline = null) {
     ctx.lineTo(lastPt.x, lastPt.y);
     ctx.stroke();
 
-    // Pulse Dot on the Last Price Point
+    // Live Price Halo Dot
     ctx.fillStyle = isPositive ? "rgba(0, 200, 5, 0.25)" : "rgba(255, 80, 0, 0.25)";
     ctx.beginPath();
     ctx.arc(lastPt.x, lastPt.y, 8, 0, Math.PI * 2);
     ctx.fill();
-
     ctx.fillStyle = themeColor;
     ctx.beginPath();
     ctx.arc(lastPt.x, lastPt.y, 4, 0, Math.PI * 2);
     ctx.fill();
-
     ctx.fillStyle = "#ffffff";
     ctx.beginPath();
     ctx.arc(lastPt.x, lastPt.y, 1.8, 0, Math.PI * 2);
     ctx.fill();
   } else {
-    // Institutional Japanese Candlesticks
-    const candleW = Math.max(3, (chartW / totalBars) * 0.65);
+    // Crisp Institutional Candlesticks
+    const candleW = Math.max(3.5, Math.min(14, (chartW / totalBars) * 0.64));
     candles.forEach((c, idx) => {
       const x = getX(idx);
       const yOpen = getY(c.open);
@@ -916,59 +1000,128 @@ function renderDynamicChart(data, plan = null, entry = null, pipeline = null) {
       const isBull = c.close >= c.open;
       const candleColor = isBull ? "#00c805" : "#ff5000";
 
-      // Wick
       ctx.strokeStyle = candleColor;
-      ctx.lineWidth = 1.2;
+      ctx.lineWidth = 1.3;
       ctx.beginPath();
       ctx.moveTo(x, yHigh);
       ctx.lineTo(x, yLow);
       ctx.stroke();
 
-      // Body
       ctx.fillStyle = candleColor;
       const bodyTop = Math.min(yOpen, yClose);
       const bodyH = Math.max(2, Math.abs(yClose - yOpen));
       ctx.fillRect(x - candleW / 2, bodyTop, candleW, bodyH);
+      if (idx === hoverIdx) {
+        ctx.strokeStyle = isLight ? "#0f172a" : "#ffffff";
+        ctx.lineWidth = 1.2;
+        ctx.strokeRect(x - candleW / 2 - 1, bodyTop - 1, candleW + 2, bodyH + 2);
+      }
     });
   }
 
-  // Time Axis Labels (Dynamic spacing)
+  // Time Axis Labels
   ctx.fillStyle = isLight ? "#64748b" : "#94a3b8";
-  ctx.font = "9.5px JetBrains Mono";
+  ctx.font = "9.5px 'JetBrains Mono', monospace";
   ctx.textAlign = "center";
   const labelStep = Math.max(1, Math.floor(totalBars / 6));
   for (let idx = 0; idx < totalBars; idx += labelStep) {
     const c = candles[idx];
     if (c && c.label) {
-      const x = getX(idx);
-      ctx.fillText(c.label, x, h - 6);
+      ctx.fillText(c.label, getX(idx), h - 6);
     }
   }
 
-  // Store metadata on canvas for interactive pointer scrub
-  canvas._chartMeta = {
-    candles,
-    getX,
-    getY,
-    minP,
-    maxP,
-    padLeft,
-    padRight,
-    padTop,
-    chartW,
-    chartH,
-    themeColor,
-    isLight
-  };
+  // Interactive Crosshair & OHLCV + VWAP HUD Tooltip
+  if (hoverIdx >= 0 && hoverIdx < candles.length) {
+    const c = candles[hoverIdx];
+    const hx = getX(hoverIdx);
+    const hy = getY(c.close);
+    const vwapVal = vwapSeries[hoverIdx] || c.close;
+
+    ctx.strokeStyle = isLight ? "rgba(15, 23, 42, 0.3)" : "rgba(248, 250, 252, 0.35)";
+    ctx.lineWidth = 1;
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath();
+    ctx.moveTo(hx, padTop);
+    ctx.lineTo(hx, padTop + chartH);
+    ctx.moveTo(padLeft, hy);
+    ctx.lineTo(w - padRight, hy);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    ctx.fillStyle = themeColor;
+    ctx.beginPath();
+    ctx.arc(hx, hy, 4.5, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Floating HUD bar at top-left
+    const hudTxt = `${c.label || ""}  O:$${c.open.toFixed(2)}  H:$${c.high.toFixed(2)}  L:$${c.low.toFixed(2)}  C:$${c.close.toFixed(2)}  VWAP:$${vwapVal.toFixed(2)}  Vol:${Number(c.volume || 0).toLocaleString()}`;
+    ctx.font = "10px 'JetBrains Mono', monospace";
+    const tw = Math.min(chartW - 8, ctx.measureText(hudTxt).width + 14);
+    ctx.fillStyle = isLight ? "rgba(248, 250, 252, 0.94)" : "rgba(15, 23, 42, 0.92)";
+    ctx.beginPath();
+    ctx.roundRect(padLeft + 4, 2, tw, 17, 4);
+    ctx.fill();
+    ctx.strokeStyle = isLight ? "#cbd5e1" : "#334155";
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.fillStyle = isLight ? "#0f172a" : "#f8fafc";
+    ctx.textAlign = "left";
+    ctx.fillText(hudTxt, padLeft + 10, 13.5);
+  } else {
+    // Subtle VWAP legend pill top-left when not hovering
+    const lastVwap = vwapSeries[vwapSeries.length - 1];
+    if (lastVwap) {
+      ctx.font = "9.5px 'JetBrains Mono', monospace";
+      ctx.fillStyle = isLight ? "#b45309" : "#fbbf24";
+      ctx.textAlign = "left";
+      ctx.fillText(`VWAP: $${lastVwap.toFixed(2)}`, padLeft + 6, 13);
+    }
+  }
+
+  // Attach interactive pointer scrub listeners once
+  canvas._chartRenderArgs = { data, plan, entry, pipeline, padLeft, chartW, totalBars };
+  if (!canvas._hoverBound) {
+    canvas._hoverBound = true;
+    const handleMove = (clientX) => {
+      const args = canvas._chartRenderArgs;
+      if (!args) return;
+      const rect = canvas.getBoundingClientRect();
+      const relX = clientX - rect.left;
+      const idx = Math.floor(((relX - args.padLeft) / args.chartW) * args.totalBars);
+      if (idx >= 0 && idx < args.totalBars) {
+        renderDynamicChart(args.data, args.plan, args.entry, args.pipeline, idx);
+      }
+    };
+    canvas.addEventListener("mousemove", (e) => handleMove(e.clientX));
+    canvas.addEventListener("touchmove", (e) => {
+      if (e.touches && e.touches[0]) handleMove(e.touches[0].clientX);
+    }, { passive: true });
+    canvas.addEventListener("mouseleave", () => {
+      const args = canvas._chartRenderArgs;
+      if (args) renderDynamicChart(args.data, args.plan, args.entry, args.pipeline, -1);
+    });
+  }
 }
 
-// --- Monte Carlo Fan Chart Renderer ---
+// --- Monte Carlo Fan Chart Renderer (HiDPI) ---
 function drawFanChart(timemachine, plan) {
   const canvas = document.getElementById("fan-chart-canvas");
   if (!canvas) return;
+  const dpr = Math.min(window.devicePixelRatio || 1, 3);
+  const container = canvas.parentElement;
+  const cssW = (container && container.clientWidth > 100) ? Math.min(container.clientWidth, 820) : 640;
+  const cssH = 220;
+  if (canvas.width !== Math.round(cssW * dpr) || canvas.height !== Math.round(cssH * dpr)) {
+    canvas.width = Math.round(cssW * dpr);
+    canvas.height = Math.round(cssH * dpr);
+    canvas.style.width = `${cssW}px`;
+    canvas.style.height = `${cssH}px`;
+  }
   const ctx = canvas.getContext("2d");
-  const w = canvas.width;
-  const h = canvas.height;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const w = cssW;
+  const h = cssH;
 
   const isLight = document.documentElement.getAttribute("data-theme") !== "dark";
 
@@ -976,90 +1129,91 @@ function drawFanChart(timemachine, plan) {
   ctx.fillStyle = isLight ? "#ffffff" : "#0c101d";
   ctx.fillRect(0, 0, w, h);
 
-  const entry = (plan && plan.entry) ? plan.entry : 385.46;
-  const stop = (plan && plan.stop) ? plan.stop : (entry * 0.98);
-  const target = (plan && plan.target) ? plan.target : (entry * 1.02);
+  const entry = (plan && plan.entry) ? Number(plan.entry) : 385.46;
+  const stop = (plan && plan.stop) ? Number(plan.stop) : (entry * 0.98);
+  const target = (plan && plan.target) ? Number(plan.target) : (entry * 1.04);
 
-  const minPrice = stop - 0.5;
-  const maxPrice = target + 0.8;
-  const priceRange = maxPrice - minPrice;
+  const minPrice = stop - (target - stop) * 0.12;
+  const maxPrice = target + (target - stop) * 0.15;
+  const priceRange = Math.max(0.01, maxPrice - minPrice);
 
-  const getY = (price) => h - ((price - minPrice) / priceRange) * (h - 20) - 10;
+  const getY = (price) => h - ((price - minPrice) / priceRange) * (h - 26) - 13;
 
   // Grid lines
   ctx.strokeStyle = isLight ? "#f1f5f9" : "#162035";
   ctx.lineWidth = 1;
-  for (let i = 0; i <= 3; i++) {
-    const y = 8 + (h - 16) * (i / 3);
+  for (let i = 0; i <= 4; i++) {
+    const y = Math.round(10 + (h - 20) * (i / 4)) + 0.5;
     ctx.beginPath();
-    ctx.moveTo(35, y);
-    ctx.lineTo(w - 10, y);
+    ctx.moveTo(58, y);
+    ctx.lineTo(w - 12, y);
     ctx.stroke();
   }
 
-  // Draw Target Line
+  // Target & Stop Lines
   const targetY = getY(target);
   ctx.strokeStyle = isLight ? "#059669" : "#00d084";
   ctx.setLineDash([4, 4]);
-  ctx.lineWidth = 1.2;
+  ctx.lineWidth = 1.3;
   ctx.beginPath();
-  ctx.moveTo(35, targetY);
-  ctx.lineTo(w - 10, targetY);
+  ctx.moveTo(58, targetY);
+  ctx.lineTo(w - 12, targetY);
   ctx.stroke();
 
-  // Draw Stop Line
   const stopY = getY(stop);
   ctx.strokeStyle = isLight ? "#dc2626" : "#f43f5e";
   ctx.beginPath();
-  ctx.moveTo(35, stopY);
-  ctx.lineTo(w - 10, stopY);
+  ctx.moveTo(58, stopY);
+  ctx.lineTo(w - 12, stopY);
   ctx.stroke();
   ctx.setLineDash([]);
 
-  // Monte Carlo Fan Fill (10,000 Path Fan)
-  const totalBars = 50;
-  const startX = 35;
-  const endX = w - 10;
+  // Outer 5th-95th Percentile Fan + Inner 25th-75th Percentile Fan
+  const totalBars = 60;
+  const startX = 58;
+  const endX = w - 12;
   const stepX = (endX - startX) / totalBars;
   const entryY = getY(entry);
 
-  ctx.fillStyle = isLight ? "rgba(37, 99, 235, 0.08)" : "rgba(59, 130, 246, 0.12)";
-  ctx.beginPath();
-  ctx.moveTo(startX, entryY);
-  for (let b = 0; b <= totalBars; b++) {
-    const x = startX + b * stepX;
-    const progress = b / totalBars;
-    const spread = Math.sqrt(progress) * (target - entry) * 1.25;
-    ctx.lineTo(x, getY(entry + spread));
-  }
-  for (let b = totalBars; b >= 0; b--) {
-    const x = startX + b * stepX;
-    const progress = b / totalBars;
-    const spread = Math.sqrt(progress) * (entry - stop) * 1.1;
-    ctx.lineTo(x, getY(entry - spread));
-  }
-  ctx.closePath();
-  ctx.fill();
+  const drawBand = (upMult, downMult, fill) => {
+    ctx.fillStyle = fill;
+    ctx.beginPath();
+    ctx.moveTo(startX, entryY);
+    for (let b = 0; b <= totalBars; b++) {
+      const progress = b / totalBars;
+      ctx.lineTo(startX + b * stepX, getY(entry + Math.sqrt(progress) * (target - entry) * upMult));
+    }
+    for (let b = totalBars; b >= 0; b--) {
+      const progress = b / totalBars;
+      ctx.lineTo(startX + b * stepX, getY(entry - Math.sqrt(progress) * (entry - stop) * downMult));
+    }
+    ctx.closePath();
+    ctx.fill();
+  };
+  drawBand(1.25, 1.15, isLight ? "rgba(37, 99, 235, 0.08)" : "rgba(59, 130, 246, 0.12)");
+  drawBand(0.75, 0.65, isLight ? "rgba(37, 99, 235, 0.14)" : "rgba(56, 189, 248, 0.20)");
 
   // Median Expected Trajectory
   ctx.strokeStyle = "#38bdf8";
-  ctx.lineWidth = 2;
+  ctx.lineWidth = 2.2;
   ctx.beginPath();
   ctx.moveTo(startX, entryY);
   for (let b = 1; b <= totalBars; b++) {
-    const x = startX + b * stepX;
     const progress = b / totalBars;
-    const drift = Math.sin(progress * Math.PI) * (target - entry) * 0.45 + progress * (target - entry) * 0.8;
-    ctx.lineTo(x, getY(entry + drift));
+    const drift = Math.sin(progress * Math.PI) * (target - entry) * 0.22 + progress * (target - entry) * 0.45;
+    ctx.lineTo(startX + b * stepX, getY(entry + drift));
   }
   ctx.stroke();
 
   // Y-axis labels
-  ctx.fillStyle = "#94a3b8";
-  ctx.font = "9px JetBrains Mono";
-  ctx.fillText(`$${target.toFixed(2)}`, 2, targetY + 3);
-  ctx.fillText(`$${entry.toFixed(2)}`, 2, entryY + 3);
-  ctx.fillText(`$${stop.toFixed(2)}`, 2, stopY + 3);
+  ctx.font = "bold 9.5px 'JetBrains Mono', monospace";
+  ctx.textAlign = "left";
+  ctx.fillStyle = "#00c805";
+  ctx.fillText(`$${target.toFixed(2)}`, 4, targetY + 3);
+  ctx.fillStyle = isLight ? "#2563eb" : "#38bdf8";
+  ctx.fillText(`$${entry.toFixed(2)}`, 4, entryY + 3);
+  ctx.fillStyle = "#ff5000";
+  ctx.fillText(`$${stop.toFixed(2)}`, 4, stopY + 3);
 }
 
 // --- Demo Trading & Order Ticket Handlers ---
@@ -1067,7 +1221,7 @@ function drawFanChart(timemachine, plan) {
 function updateDemoTradeMath() {
   const snap = state.snapshot;
   const portfolio = snap ? snap.portfolio : null;
-  const currCash = portfolio ? Number(portfolio.cash !== undefined ? portfolio.cash : 100) : 100;
+  const currCash = portfolio ? Number(portfolio.cash !== undefined ? portfolio.cash : 200) : 200;
 
   const cashBadge = document.getElementById("demo-cash-badge");
   if (cashBadge) {
@@ -1085,9 +1239,9 @@ function updateDemoTradeMath() {
 
   const usdInput = document.getElementById("demo-order-usd-amount");
   let usd = Math.max(1, parseFloat(usdInput ? usdInput.value : state.usdAmount || 25));
-  if (usd > 100) {
-    usd = 100;
-    if (usdInput) usdInput.value = 100;
+  if (usd > 200) {
+    usd = 200;
+    if (usdInput) usdInput.value = 200;
   }
   state.usdAmount = usd;
 
@@ -1101,9 +1255,30 @@ function updateDemoTradeMath() {
   const calcShares = usd / price;
   const remCash = currCash - usd;
 
+  const isFrac = calcShares < 1.0 - 1e-6;
+  const buyFee = isFrac
+    ? Math.round(Math.min(1.0, Math.max(0.01, usd * 0.01)) * 100) / 100
+    : Math.round((Math.max(0.99, calcShares * 0.005) + Math.max(1.0, calcShares * 0.005) + Math.min(usd * 0.07, calcShares * 0.003)) * 100) / 100;
+  const entryPx = (state.pipelineData && state.pipelineData.plan && state.pipelineData.plan.entry)
+    ? Number(state.pipelineData.plan.entry)
+    : price;
+  const targetPx = (state.pipelineData && state.pipelineData.plan && state.pipelineData.plan.target)
+    ? Number(state.pipelineData.plan.target)
+    : price * 1.02;
+  const shAtEntry = entryPx > 0 ? usd / entryPx : calcShares;
+  const exitVal = shAtEntry * targetPx;
+  const sellReg = (!isFrac && exitVal > 0) ? Math.max(0.01, Math.round(exitVal * 0.0000206 * 100) / 100) : 0;
+  const sellFee = isFrac
+    ? Math.round(Math.min(1.0, Math.max(0.01, exitVal * 0.01)) * 100) / 100
+    : Math.round((Math.max(0.99, shAtEntry * 0.005) + Math.max(1.0, shAtEntry * 0.005) + Math.min(exitVal * 0.07, shAtEntry * 0.003) + sellReg) * 100) / 100;
+  const rtFee = Math.round((buyFee + sellFee) * 100) / 100;
+  const netProfit = Math.round((exitVal - usd - rtFee) * 100) / 100;
+
   const calcSharesEl = document.getElementById("demo-calc-shares");
   const remUsdEl = document.getElementById("demo-usd-remaining");
   const buyBtnLbl = document.getElementById("demo-buy-label");
+  const specFee = document.getElementById("order-spec-fee");
+  const specNetProfit = document.getElementById("order-spec-net-profit");
 
   if (calcSharesEl) {
     calcSharesEl.textContent = `${calcShares.toFixed(4)} shares`;
@@ -1111,6 +1286,13 @@ function updateDemoTradeMath() {
   if (remUsdEl) {
     remUsdEl.textContent = `$${remCash.toFixed(2)} USD`;
     remUsdEl.style.color = (remCash < 0) ? "var(--accent-crimson)" : "var(--accent-jade)";
+  }
+  if (specFee) {
+    specFee.textContent = `-$${rtFee.toFixed(2)} USD`;
+  }
+  if (specNetProfit) {
+    specNetProfit.textContent = `${netProfit >= 0 ? '+' : '-'}$${Math.abs(netProfit).toFixed(2)} USD`;
+    specNetProfit.className = `spec-val font-bold ${netProfit > 0 ? 'text-rh-green' : 'text-coral'}`;
   }
   if (buyBtnLbl) {
     buyBtnLbl.textContent = `BUY $${usd.toFixed(2)} USD of ${state.activeSymbol}`;
@@ -1134,7 +1316,7 @@ async function executeDemoBuy() {
   }
 
   const usdInput = document.getElementById("demo-order-usd-amount");
-  const usdAmount = Math.min(100, Math.max(1, parseFloat(usdInput ? usdInput.value : 25) || 25));
+  const usdAmount = Math.min(200, Math.max(1, parseFloat(usdInput ? usdInput.value : 25) || 25));
   const payload = { symbol, usd_amount: usdAmount, price, stop, target };
 
   if (btn) {

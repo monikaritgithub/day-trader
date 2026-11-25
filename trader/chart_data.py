@@ -141,13 +141,52 @@ def fetch_chart_data(symbol: str, timeframe: str = "1D") -> Dict[str, Any]:
     change_usd = round(last_c - first_c, 2)
     change_pct = round((change_usd / first_c) * 100, 2) if first_c > 0 else 0.0
 
-    # Key quantitative trading levels for ORB setup
-    or_high = round(current_price * 0.995, 2)
-    or_low = round(current_price * 0.985, 2)
-    entry_p = round(or_high + 0.15, 2)
-    stop_p = round((or_high + or_low) / 2.0, 2)
-    risk = round(entry_p - stop_p, 2)
-    target_p = round(entry_p + risk, 2)
+    # Key quantitative trading levels aligned with trader-exit skill math
+    from decimal import Decimal, ROUND_FLOOR, ROUND_HALF_UP
+    plan_file = TRADER_DIR / "plan.json"
+    plan_doc = None
+    if plan_file.is_file():
+        try:
+            with open(plan_file, "r", encoding="utf-8") as f:
+                pd = json.load(f)
+                if str(pd.get("symbol", "")).upper() == symbol:
+                    plan_doc = pd
+        except Exception:
+            plan_doc = None
+
+    if plan_doc and plan_doc.get("entry") and plan_doc.get("stop") and plan_doc.get("target"):
+        entry_p = float(plan_doc["entry"])
+        stop_p = float(plan_doc["stop"])
+        target_p = float(plan_doc["target"])
+        or_d = plan_doc.get("opening_range") or {}
+        or_high = float(or_d.get("high", round(current_price * 0.996, 2)))
+        or_low = float(or_d.get("low", round(current_price * 0.978, 2)))
+    else:
+        # Derive 15m Opening Range from first 3 completed 5m candles on 1D chart when available
+        if timeframe == "1D" and len(candles) >= 3:
+            or_bars = candles[:3]
+            or_high = round(max(b["high"] for b in or_bars), 2)
+            or_low = round(min(b["low"] for b in or_bars), 2)
+            # First completed 5m bar closing above or_high after opening range
+            entry_p = None
+            for b in candles[3:]:
+                if b["close"] > or_high:
+                    entry_p = round(b["close"], 2)
+                    break
+            if entry_p is None:
+                entry_p = round(max(current_price, or_high + 0.05), 2)
+        else:
+            or_high = round(current_price * 0.996, 2)
+            or_low = round(current_price * 0.978, 2)
+            entry_p = round(or_high * 1.003, 2)
+
+        # trader-exit exact midpoint floor + 2R half-up rounding
+        mid_dec = (Decimal(str(or_high)) + Decimal(str(or_low))) / Decimal("2")
+        stop_p = float(mid_dec.quantize(Decimal("0.01"), rounding=ROUND_FLOOR))
+        if stop_p >= entry_p:
+            stop_p = float((Decimal(str(entry_p)) * Decimal("0.98")).quantize(Decimal("0.01"), rounding=ROUND_FLOOR))
+        risk_dec = Decimal(str(entry_p)) - Decimal(str(stop_p))
+        target_p = float((Decimal(str(entry_p)) + Decimal("2") * risk_dec).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
     result = {
         "symbol": symbol,

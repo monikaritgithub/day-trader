@@ -8,6 +8,7 @@ import os
 import sys
 import json
 import time
+import subprocess
 import datetime
 import zoneinfo
 from pathlib import Path
@@ -21,6 +22,14 @@ sys.path.insert(0, str(REPO_DIR))
 from trader.tiger_fees import calculate_tiger_nz_fee, evaluate_tiger_nz_order_plan
 from trader.daily_reporter import send_daily_market_close_report, load_env
 from trader.pipeline import resolve_real_market_price, get_all_11_skills_approved_stocks
+
+NYSE_HOLIDAYS = {
+    "2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25",
+    "2026-06-19", "2026-07-03", "2026-09-07", "2026-11-26", "2026-12-25",
+    "2027-01-01", "2027-01-18", "2027-02-15", "2027-03-26", "2027-05-31",
+    "2027-06-18", "2027-07-05", "2027-09-06", "2027-11-25", "2027-12-24",
+}
+NYSE_EARLY_CLOSE = {"2026-11-27", "2026-12-24", "2027-11-26"}
 
 load_env()
 
@@ -51,8 +60,9 @@ class AutoTraderEngine:
     def __init__(self):
         self.load_configuration()
         self.universe_symbols = self._load_universe_pool()
-        self.universe_pointer = 0
-        self.last_email_date_sent = None
+        persisted = read_json_safe(AUTOTRADER_STATE_FILE, {}) or {}
+        self.universe_pointer = int(persisted.get("universe_pointer", 0))
+        self.last_email_date_sent = persisted.get("last_email_sent_date")
 
     def load_configuration(self):
         load_env()
@@ -69,49 +79,74 @@ class AutoTraderEngine:
         self.auto_trading_enabled = os.environ.get("AUTO_TRADING_ENABLED", "true").lower() == "true"
 
     def _load_universe_pool(self) -> List[str]:
-        """Loads broad US stock universe."""
+        """Loads ALL US-listed stocks from trader/universe.txt (built by trader-scanner)."""
         priority_pool = [
             "TSLA", "NVDA", "AAPL", "AMD", "MSFT", "AMZN", "META", "GOOGL", "PLTR", "SOFI",
             "MARA", "COIN", "SMCI", "F", "RIVN", "AAL", "NIO", "LCID", "WBD", "SNAP",
             "PFE", "BABA", "TSM", "UBER", "INTC", "PYPL", "HOOD", "GME", "AMC", "ARM"
         ]
         pool = list(priority_pool)
+        seen = set(pool)
+        if not UNIVERSE_FILE.is_file():
+            try:
+                subprocess.run(
+                    [sys.executable, "trader-scanner/scan.py", "universe"],
+                    cwd=str(REPO_DIR), capture_output=True, timeout=25
+                )
+            except Exception:
+                pass
         if UNIVERSE_FILE.is_file():
             try:
                 with open(UNIVERSE_FILE, "r", encoding="utf-8") as f:
                     for line in f:
                         if "|" in line:
                             sym = line.split("|", 1)[0].strip()
-                            if sym and sym not in pool and "." not in sym:
+                            if sym and sym not in seen and "." not in sym:
                                 pool.append(sym)
-                                if len(pool) >= 1200:
-                                    break
+                                seen.add(sym)
             except Exception:
                 pass
         return pool
 
+    def next_universe_batch(self, batch_size: int = 100) -> List[str]:
+        """Returns the next rolling batch across ALL US-listed stocks in universe.txt."""
+        if not self.universe_symbols:
+            self.universe_symbols = self._load_universe_pool()
+        total = len(self.universe_symbols)
+        if total == 0:
+            return []
+        start = self.universe_pointer % total
+        end = start + batch_size
+        if end <= total:
+            batch = self.universe_symbols[start:end]
+        else:
+            batch = self.universe_symbols[start:] + self.universe_symbols[: end - total]
+        self.universe_pointer = end % total
+        return batch
+
     def get_market_times(self) -> Dict[str, Any]:
-        """Calculates exact NZDT and NY times and trading session phase."""
+        """Calculates exact NZDT/NZST and NY times, honoring NYSE holidays and early closes."""
         utc_now = datetime.datetime.now(datetime.timezone.utc)
         ny_tz = zoneinfo.ZoneInfo("America/New_York")
         nz_tz = zoneinfo.ZoneInfo("Pacific/Auckland")
         ny_dt = utc_now.astimezone(ny_tz)
         nz_dt = utc_now.astimezone(nz_tz)
 
-        is_weekday_ny = (ny_dt.weekday() < 5) # 0=Mon, 4=Fri
+        ny_date_iso = ny_dt.date().isoformat()
+        is_trading_day = (ny_dt.weekday() < 5) and (ny_date_iso not in NYSE_HOLIDAYS)
+        is_early_close = ny_date_iso in NYSE_EARLY_CLOSE
         ny_minutes = ny_dt.hour * 60 + ny_dt.minute
 
-        # Regular Market Session: 09:30 AM - 16:00 PM ET
-        # Auckland NZDT equivalent: 03:30 AM - 10:00 AM NZDT
         market_open_ny = 9 * 60 + 30
         orb_complete_ny = 9 * 60 + 45
-        flat_by_ny = 15 * 60 + 55
-        market_close_ny = 16 * 60
+        market_close_ny = (13 * 60) if is_early_close else (16 * 60)
+        entry_cutoff_ny = (12 * 60 + 30) if is_early_close else (15 * 60 + 30)
+        flat_by_ny = market_close_ny - 5
 
-        is_market_open = is_weekday_ny and (market_open_ny <= ny_minutes < market_close_ny)
-        is_orb_trading_active = is_weekday_ny and (orb_complete_ny <= ny_minutes < flat_by_ny)
-        is_flat_by_time = is_weekday_ny and (ny_minutes >= flat_by_ny and ny_minutes < market_close_ny)
-        is_close_reporting_time = is_weekday_ny and (ny_minutes >= flat_by_ny and ny_minutes <= flat_by_ny + 15)
+        is_market_open = is_trading_day and (market_open_ny <= ny_minutes < market_close_ny)
+        is_orb_trading_active = is_trading_day and (orb_complete_ny <= ny_minutes < entry_cutoff_ny)
+        is_flat_by_time = is_trading_day and (ny_minutes >= flat_by_ny and ny_minutes < market_close_ny)
+        is_close_reporting_time = is_trading_day and (flat_by_ny <= ny_minutes <= market_close_ny + 30)
 
         return {
             "utc_now": utc_now,
@@ -120,7 +155,7 @@ class AutoTraderEngine:
             "nz_time_str": nz_dt.strftime("%Y-%m-%d %I:%M:%S %p NZDT"),
             "nz_date_str": nz_dt.strftime("%Y-%m-%d"),
             "ny_time_str": ny_dt.strftime("%Y-%m-%d %I:%M:%S %p ET"),
-            "is_weekday_ny": is_weekday_ny,
+            "is_weekday_ny": is_trading_day,
             "is_market_open": is_market_open,
             "is_orb_trading_active": is_orb_trading_active,
             "is_flat_by_time": is_flat_by_time,
@@ -329,19 +364,110 @@ class AutoTraderEngine:
                 # Mandatory 09:55 AM NZDT close!
                 self.execute_sell(sym, shares, current_price, "09:55 Flat-by-Close Rule")
             elif current_price >= target_price:
-                # Take Profit hit (+1R)
-                self.execute_sell(sym, shares, current_price, "1R Profit Target Reached")
+                self.execute_sell(sym, shares, current_price, "Profit Target Reached")
             elif current_price <= stop_price:
-                # Stop Loss hit (Midpoint stop discipline)
                 self.execute_sell(sym, shares, current_price, "Midpoint Stop Cut Loss")
 
+    def execute_skill_verified_buy(self, stock: Dict[str, Any], usd_to_use: float) -> Optional[Dict[str, Any]]:
+        """
+        Runs the Day Trading Skills pipeline before placing an automated paper BUY:
+        trader-news -> trader-entry -> trader-exit -> trader-timemachine ->
+        trader-budget (size.py) -> trader-risk (check.py) -> trader-alerts.
+        """
+        sym = str(stock.get("symbol", "")).upper().strip()
+        if not sym:
+            return None
+
+        # 1. trader-news: abort if dangerous catalyst (halt, bankruptcy, delist, offering)
+        try:
+            news_proc = subprocess.run(
+                [sys.executable, "trader-news/news.py", "--tickers", sym, "--hours", "24", "--no-moves", "--json"],
+                cwd=str(REPO_DIR), capture_output=True, text=True, timeout=10
+            )
+            if news_proc.stdout.strip():
+                news_doc = json.loads(news_proc.stdout)
+                for item in news_doc.get("items", []):
+                    tags = set(item.get("tags", []))
+                    if tags & {"halt", "risk"}:
+                        return None
+        except Exception:
+            pass
+
+        # 2. trader-entry: require confirmed closed-bar ORB breakout
+        try:
+            e_proc = subprocess.run(
+                [sys.executable, "trader-entry/entry.py", "check", sym, "--setup", "orb", "--write"],
+                cwd=str(REPO_DIR), capture_output=True, text=True, timeout=10
+            )
+            if e_proc.returncode != 0:
+                return None
+        except Exception:
+            return None
+
+        entry_p = float(stock.get("entry", 0))
+        stop_p = float(stock.get("stop", 0))
+        target_p = float(stock.get("target", 0))
+        target_r = int(round(float(stock.get("target_r", 2))))
+
+        # 3. trader-exit: write formal exit plan
+        try:
+            x_proc = subprocess.run(
+                [
+                    sys.executable, "trader-exit/exit.py", "plan",
+                    "--stop", "or-mid", "--target", f"{target_r}R", "--write"
+                ],
+                cwd=str(REPO_DIR), capture_output=True, text=True, timeout=8
+            )
+            if x_proc.returncode != 0:
+                return None
+        except Exception:
+            return None
+
+        # 4. trader-timemachine: 60-day Monte Carlo check up to flat_by
+        try:
+            subprocess.run(
+                [sys.executable, "trader-timemachine/timemachine.py", "run", "--until", "15:55", "--replays", "2000", "--seed", "19", "--write"],
+                cwd=str(REPO_DIR), capture_output=True, timeout=12
+            )
+        except Exception:
+            pass
+
+        # 5. trader-budget + trader-risk: formal bracket sizing & risk check
+        try:
+            b_proc = subprocess.run(
+                [sys.executable, "trader-budget/size.py", "--limit", "--write"],
+                cwd=str(REPO_DIR), capture_output=True, text=True, timeout=8
+            )
+            if b_proc.returncode != 0:
+                return None
+            r_proc = subprocess.run(
+                [sys.executable, "trader-risk/check.py"],
+                cwd=str(REPO_DIR), capture_output=True, text=True, timeout=8
+            )
+            if r_proc.returncode != 0:
+                return None
+        except Exception:
+            return None
+
+        # 6. Execute fractional paper buy + arm trader-alerts
+        trade = self.execute_buy(sym, entry_p, stop_p, target_p, usd_amount=usd_to_use)
+        if trade:
+            try:
+                subprocess.run(
+                    [sys.executable, "trader-alerts/alerts.py", "add", "--from-plan"],
+                    cwd=str(REPO_DIR), capture_output=True, timeout=8
+                )
+            except Exception:
+                pass
+        return trade
+
     def run_cycle(self) -> Dict[str, Any]:
-        """Runs a complete autonomous cycle."""
+        """Runs a complete autonomous cycle using all 11 Day Trading skills."""
         self.load_configuration()
         m_times = self.get_market_times()
         today_nz = m_times["nz_date_str"]
 
-        # 1. Check Mandatory Flat-by-close (09:55 AM NZDT)
+        # 1. Check Mandatory Flat-by-close (09:55 AM NZDT / 15:55 ET)
         if m_times["is_flat_by_time"]:
             self.monitor_open_positions(is_flat_time=True)
 
@@ -351,22 +477,22 @@ class AutoTraderEngine:
                 res = send_daily_market_close_report()
                 if res.get("success"):
                     self.last_email_date_sent = today_nz
-                    write_json_safe(AUTOTRADER_STATE_FILE, {"last_email_sent_date": today_nz})
+                    write_json_safe(AUTOTRADER_STATE_FILE, {
+                        "last_email_sent_date": today_nz,
+                        "universe_pointer": self.universe_pointer
+                    })
             except Exception:
                 pass
 
-        # 3. If within active ORB trading window, monitor positions & scan universe
+        # 3. If within active ORB trading window, monitor positions & scan US universe
         if m_times["is_orb_trading_active"] and self.auto_trading_enabled:
-            # First, manage existing positions
             self.monitor_open_positions(is_flat_time=False)
 
-            # Check if we have room for new positions
             portfolio = read_json_safe(PORTFOLIO_FILE, {"cash": self.initial_capital, "positions": []})
             current_positions = portfolio.get("positions", [])
             held_symbols = {p.get("ticker") for p in current_positions}
             cash = float(portfolio.get("cash", 0))
 
-            # Check daily trade count & daily loss limits before scanning for new entries
             th_data = read_json_safe(HISTORY_FILE, {"trades": []}) or {"trades": []}
             today_trades_list = [
                 t for t in th_data.get("trades", [])
@@ -384,20 +510,16 @@ class AutoTraderEngine:
                 and realized_loss_today < self.max_daily_loss
                 and cash >= 10.0
             ):
-                # Scan universe batch for verified, fee-profitable approved stocks
                 approved_stocks = get_all_11_skills_approved_stocks()
                 for stock in approved_stocks:
                     sym = stock.get("symbol")
                     if sym not in held_symbols and stock.get("status") == "APPROVED":
                         entry_p = float(stock.get("entry", 0))
-                        stop_p = float(stock.get("stop", 0))
-                        target_p = float(stock.get("target", 0))
                         curr_p = float(stock.get("price", entry_p))
-
                         if curr_p >= (entry_p * 0.998):
                             usd_to_use = min(self.target_order_usd, self.max_order_usd, cash * 0.5)
                             if usd_to_use >= 1.0:
-                                self.execute_buy(sym, curr_p, stop_p, target_p, usd_amount=usd_to_use)
+                                self.execute_skill_verified_buy(stock, usd_to_use)
                                 break
 
         return {

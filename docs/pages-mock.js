@@ -85,7 +85,8 @@
     const orLow = Math.round(px * 0.978 * 100) / 100;
     const orHigh = Math.round(px * 0.996 * 100) / 100;
     const entry = Math.round(orHigh * 1.003 * 100) / 100; // +0.3% breakout close above OR high
-    const stop = Math.round(((orHigh + orLow) / 2) * 100) / 100; // OR midpoint stop (~1.2% risk)
+    // Match trader-exit/exit.py: long midpoint stop rounded DOWN (ROUND_FLOOR) to cent
+    const stop = Math.floor(((orHigh + orLow) / 2) * 100 + 1e-9) / 100;
     const risk = Math.max(0.01, Math.round((entry - stop) * 100) / 100);
     return { px, orLow, orHigh, entry, stop, risk };
   }
@@ -135,13 +136,13 @@
   function selectViableTarget(sym, entry, stop, risk, usd) {
     // Follow trader-exit default 2R first, then 3R if 2R doesn't clear Tiger NZ round-trip fees
     for (const rMult of [2, 3]) {
-      const target = Math.round((entry + rMult * risk) * 100) / 100;
+      const target = Math.round((entry + rMult * risk) * 100 + 1e-9) / 100;
       const ev = evaluateTigerPlan(sym, entry, stop, target, usd, 1.5, 0.05);
       if (ev.approved) {
         return { rMult, target, tiger: ev };
       }
     }
-    const fallbackTarget = Math.round((entry + 2 * risk) * 100) / 100;
+    const fallbackTarget = Math.round((entry + 2 * risk) * 100 + 1e-9) / 100;
     return { rMult: 2, target: fallbackTarget, tiger: evaluateTigerPlan(sym, entry, stop, fallbackTarget, usd, 1.5, 0.05) };
   }
 
@@ -234,7 +235,7 @@
 
   function buildPipeline(symbol, usdAmount) {
     const sym = (symbol || "TSLA").toUpperCase();
-    const usd = Math.min(50, Math.max(1, Number(usdAmount || 25)));
+    const usd = Math.min(200, Math.max(1, Number(usdAmount || 25)));
     const { px, orLow, orHigh, entry, stop, risk } = buildOrbGeometry(sym);
     const { rMult, target, tiger } = selectViableTarget(sym, entry, stop, risk, usd);
     const econ = tiger.economics;
@@ -306,6 +307,7 @@
         open_positions_count: store.positions.length,
         paper_mode: true,
         auto_scan_enabled: store.autoScan,
+        universe_count: 5925,
       },
       portfolio: { cash: store.cash, positions: store.positions },
       prices: { prices: PRICES },

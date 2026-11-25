@@ -291,12 +291,20 @@
                 <span class="spec-val text-coral" id="order-spec-stop">$377.75</span>
               </div>
               <div class="spec-row">
-                <span class="spec-name">Take-Profit (1R Target):</span>
+                <span class="spec-name" id="order-spec-target-label">Take-Profit (2R Target):</span>
                 <span class="spec-val text-rh-green" id="order-spec-target">$393.17</span>
               </div>
               <div class="spec-row">
                 <span class="spec-name">Max Loss at Stop:</span>
                 <span class="spec-val text-coral font-bold" id="order-spec-maxloss">-$0.50 USD</span>
+              </div>
+              <div class="spec-row">
+                <span class="spec-name">Tiger NZ Round-Trip Fee:</span>
+                <span class="spec-val text-coral" id="order-spec-fee">-$0.50 USD</span>
+              </div>
+              <div class="spec-row">
+                <span class="spec-name">Net Added If Win:</span>
+                <span class="spec-val text-rh-green font-bold" id="order-spec-net-profit">+$0.50 USD</span>
               </div>
               <div class="spec-row divider">
                 <span class="spec-name">Remaining Buying Power:</span>
@@ -494,12 +502,32 @@
               <span class="ts-val text-coral" id="tiger-spec-stop">$377.75</span>
             </div>
             <div class="tiger-spec-box">
-              <span class="ts-lbl">1R Target</span>
+              <span class="ts-lbl" id="tiger-spec-target-label">2R Target</span>
               <span class="ts-val text-rh-green" id="tiger-spec-target">$393.17</span>
             </div>
             <div class="tiger-spec-box">
               <span class="ts-lbl">Tiger Sizing</span>
               <span class="ts-val" id="tiger-spec-shares">0.0649 shares ($25.00)</span>
+            </div>
+            <div class="tiger-spec-box">
+              <span class="ts-lbl">Est. Round-Trip Fees</span>
+              <span class="ts-val text-coral" id="tiger-spec-rt-fee">-$0.50 USD (Buy $0.25 + Sell $0.25)</span>
+            </div>
+            <div class="tiger-spec-box">
+              <span class="ts-lbl">Gross Profit (At Target)</span>
+              <span class="ts-val text-bright" id="tiger-spec-gross-profit">+$1.00 USD</span>
+            </div>
+            <div class="tiger-spec-box">
+              <span class="ts-lbl">Exact Net Added If Successful</span>
+              <span class="ts-val text-rh-green" id="tiger-spec-net-added">+$0.50 USD</span>
+            </div>
+            <div class="tiger-spec-box">
+              <span class="ts-lbl">Account Balance After Win</span>
+              <span class="ts-val text-rh-green" id="tiger-spec-new-balance">$200.50 USD</span>
+            </div>
+            <div class="tiger-spec-box full-width">
+              <span class="ts-lbl">If Stop Hit (Max Net Loss incl. Fees):</span>
+              <span class="ts-val text-coral" id="tiger-spec-stop-impact">-$0.90 USD (Break-Even Win Rate: 64.3%)</span>
             </div>
             <div class="tiger-spec-box full-width">
               <span class="ts-lbl">Mandatory Flatten Rule:</span>

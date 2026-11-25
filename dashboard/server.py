@@ -26,7 +26,7 @@ from trader.pipeline import run_day_trader_pipeline, resolve_real_market_price, 
 from trader.tiger_fees import calculate_tiger_nz_fee, preview_round_trip_economics, check_fractional_support
 from trader.chart_data import fetch_chart_data
 from trader.daily_reporter import send_daily_market_close_report
-from trader.auto_trader import run_auto_trader_cycle
+from trader.auto_trader import run_auto_trader_cycle, get_auto_trader
 
 REPO_DIR = Path(__file__).resolve().parent.parent
 TRADER_DIR = REPO_DIR / "trader"
@@ -276,20 +276,19 @@ async def handle_get_state(request: web.Request) -> web.Response:
 async def handle_post_scan(request: web.Request) -> web.Response:
     data = await request.json()
     mode = data.get("mode", "daily") # "daily" or "orb"
-    symbols = data.get("symbols", "")
+    symbols = str(data.get("symbols", "")).strip()
     approved_only = data.get("approved_only", True)
     
+    # Ensure full US stock universe exists (~5,925+ Nasdaq/NYSE tickers)
+    if not (TRADER_DIR / "universe.txt").is_file():
+        await run_cli_cmd(["trader-scanner/scan.py", "universe"], timeout=45.0)
+
     args = ["trader-scanner/scan.py", mode]
-    if mode == "daily":
-        if symbols:
-            args.extend(["--symbols", symbols])
-        else:
-            args.extend(["--symbols", "TSLA,NVDA,AAPL,AMD,MSFT,AMZN,META,GOOGL,PLTR,SOFI,MARA,COIN,SMCI,F,RIVN,AAL,NIO,LCID,WBD,SNAP,PFE,BABA,TSM,UBER,INTC,PYPL,HOOD,GME,AMC,ARM"])
-    elif mode == "orb":
-        if symbols:
-            args.extend(["--symbols", symbols])
-    
-    code, stdout, stderr = await run_cli_cmd(args, timeout=60.0)
+    if symbols and symbols.upper() != "ALL":
+        args.extend(["--symbols", symbols])
+    # When symbols is empty or "ALL", scan.py scans the entire trader/universe.txt
+    timeout_s = 180.0 if (not symbols or symbols.upper() == "ALL") else 60.0
+    code, stdout, stderr = await run_cli_cmd(args, timeout=timeout_s)
     watchlist = read_json_safe(TRADER_DIR / "watchlist.json") or {}
     cur_pf = read_json_safe(TRADER_DIR / "portfolio.json") or {}
     cur_px = read_json_safe(TRADER_DIR / "prices.json") or {}
@@ -1171,33 +1170,44 @@ async def background_poller():
             except Exception:
                 pass
 
-            # Autonomous Continuous Scanner Loop (every 30s)
+            # Autonomous Continuous All-US-Stock Scanner Loop (rolling 100-stock batches across all ~5,925 tickers in universe.txt)
             global last_auto_scan_time, auto_scan_enabled
             now_ts = time.time()
             if auto_scan_enabled and (now_ts - last_auto_scan_time >= 30.0):
                 last_auto_scan_time = now_ts
-                symbols_pools = [
-                    "TSLA,NVDA,AAPL,AMD,MSFT,AMZN,META,GOOGL,PLTR,SOFI",
-                    "MARA,COIN,SMCI,F,RIVN,AAL,NIO,LCID,WBD,SNAP",
-                    "PFE,BABA,TSM,UBER,INTC,PYPL,HOOD,GME,AMC,ARM",
-                    "COIN,ROKU,SHOP,SQ,DKNG,AFRM,CRWD,NET,SNOW,DDOG",
-                    "MU,QCOM,AVGO,TXN,INTC,AMAT,LRCX,KLAC,MRVL,ON"
-                ]
-                pool_idx = int(now_ts // 30) % len(symbols_pools)
-                symbols_to_scan = symbols_pools[pool_idx]
-                scode, sout, serr = await run_cli_cmd(["trader-scanner/scan.py", "daily", "--symbols", symbols_to_scan], timeout=40.0)
-                wl = read_json_safe(TRADER_DIR / "watchlist.json") or {}
-                if wl.get("hits"):
-                    cur_pf = read_json_safe(TRADER_DIR / "portfolio.json") or {}
-                    cur_px = read_json_safe(TRADER_DIR / "prices.json") or {}
-                    wl = enrich_watchlist_with_signals(wl, cur_pf, cur_px)
+                engine = get_auto_trader()
+                batch_syms = engine.next_universe_batch(100)
+                if batch_syms:
+                    m_times = engine.get_market_times()
+                    scan_mode = "orb" if m_times.get("is_orb_trading_active") else "daily"
+                    prev_wl = read_json_safe(TRADER_DIR / "watchlist.json") or {}
+                    prev_hits = {h.get("symbol"): h for h in prev_wl.get("hits", []) if h.get("symbol")}
+                    symbols_to_scan = ",".join(batch_syms)
+                    scode, sout, serr = await run_cli_cmd(
+                        ["trader-scanner/scan.py", scan_mode, "--symbols", symbols_to_scan],
+                        timeout=45.0
+                    )
+                    wl = read_json_safe(TRADER_DIR / "watchlist.json") or {}
+                    # Merge hits across rolling universe batches so earlier US stock hits are preserved
+                    for h in wl.get("hits", []):
+                        if h.get("symbol"):
+                            prev_hits[h["symbol"]] = h
+                    merged_hits = list(prev_hits.values())
+                    wl["hits"] = merged_hits
+                    wl["universe"] = len(engine.universe_symbols)
+                    wl["universe_cursor"] = engine.universe_pointer
+                    if merged_hits:
+                        cur_pf = read_json_safe(TRADER_DIR / "portfolio.json") or {}
+                        cur_px = read_json_safe(TRADER_DIR / "prices.json") or {}
+                        wl = enrich_watchlist_with_signals(wl, cur_pf, cur_px)
                     write_json_safe(TRADER_DIR / "watchlist.json", wl)
-                    await broadcast_ws({
-                        "type": "scan_complete",
-                        "mode": "auto-daily",
-                        "watchlist": wl,
-                        "stdout": sout
-                    })
+                    if wl.get("hits"):
+                        await broadcast_ws({
+                            "type": "scan_complete",
+                            "mode": f"auto-{scan_mode}",
+                            "watchlist": wl,
+                            "stdout": sout
+                        })
 
             # Periodically broadcast clock & telemetry
             clock = get_market_clock_summary()

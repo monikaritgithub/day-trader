@@ -64,9 +64,13 @@ def build_daily_report_data() -> Dict[str, Any]:
 
     trades: List[Dict[str, Any]] = th_data.get("trades", [])
 
-    # Filter trades for today (Auckland NZDT date)
+    # Filter trades for today (Auckland NZDT/NZST date)
     now_utc = datetime.datetime.now(datetime.timezone.utc)
-    nz_today_str = (now_utc + datetime.timedelta(hours=13)).strftime("%Y-%m-%d")
+    try:
+        import zoneinfo
+        nz_today_str = now_utc.astimezone(zoneinfo.ZoneInfo("Pacific/Auckland")).strftime("%Y-%m-%d")
+    except Exception:
+        nz_today_str = (now_utc + datetime.timedelta(hours=13)).strftime("%Y-%m-%d")
 
     today_trades = [
         t for t in trades
