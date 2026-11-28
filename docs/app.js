@@ -756,8 +756,9 @@ async function loadAndDrawChart(symbol, tf = (state.activeTimeframe || "1D"), pl
   symbol = (symbol || state.activeSymbol || "TSLA").toUpperCase();
   const cacheKey = `${symbol}_${tf}`;
 
-  // If already fetched recently in cache, render immediately
-  if (state.chartCache && state.chartCache[cacheKey]) {
+  // Render cached chart immediately if within 45s TTL so intraday live bars stay fresh
+  const nowMs = Date.now();
+  if (state.chartCache && state.chartCache[cacheKey] && (nowMs - (state.chartCache[cacheKey]._fetchedAt || 0)) < 45000) {
     renderDynamicChart(state.chartCache[cacheKey], plan, entry, pipeline);
     return;
   }
@@ -768,6 +769,7 @@ async function loadAndDrawChart(symbol, tf = (state.activeTimeframe || "1D"), pl
     const data = await res.json();
     if (data.success) {
       if (!state.chartCache) state.chartCache = {};
+      data._fetchedAt = Date.now();
       state.chartCache[cacheKey] = data;
       renderDynamicChart(data, plan, entry, pipeline);
     }
@@ -1764,6 +1766,10 @@ function renderTelemetry(clock, telemetry) {
   if (clock && clock.next_open) {
     const nextOpen = document.getElementById("market-next-open");
     if (nextOpen) nextOpen.textContent = clock.next_open;
+    const tapeNzStatus = document.getElementById("tape-nz-status");
+    if (tapeNzStatus) {
+      tapeNzStatus.textContent = clock.is_open ? "(Market LIVE)" : `(${clock.next_open})`;
+    }
   }
 
   if (telemetry) {
@@ -1806,6 +1812,44 @@ function updateAutoScanUI(enabled) {
   }
 }
 
+function renderTickerTapeQuotes(pricesRaw, watchlist) {
+  const quoteEls = document.querySelectorAll("#ticker-tape-track .stock-quote");
+  const pricesMap = (pricesRaw && pricesRaw.prices) ? pricesRaw.prices : (pricesRaw || {});
+  const detailMap = (pricesRaw && pricesRaw.detail) ? pricesRaw.detail : {};
+  if (!quoteEls.length || !pricesMap) return;
+  const pctMap = {};
+  Object.keys(detailMap).forEach((k) => {
+    if (detailMap[k] && detailMap[k].pct !== undefined && detailMap[k].pct !== null) {
+      pctMap[String(k).toUpperCase()] = Number(detailMap[k].pct);
+    }
+  });
+  const list = (watchlist && Array.isArray(watchlist.hits))
+    ? watchlist.hits
+    : ((watchlist && Array.isArray(watchlist.results)) ? watchlist.results : []);
+  list.forEach((item) => {
+    if (!item || !item.symbol) return;
+    const rawPct = item.change_pct !== undefined ? item.change_pct : item.pct;
+    if (rawPct !== undefined && rawPct !== null && pctMap[String(item.symbol).toUpperCase()] === undefined) {
+      pctMap[String(item.symbol).toUpperCase()] = Number(rawPct);
+    }
+  });
+  quoteEls.forEach((el) => {
+    const strong = el.querySelector("strong");
+    const sym = strong ? strong.textContent.trim().toUpperCase() : "";
+    if (!sym) return;
+    const px = Number(pricesMap[sym]);
+    if (!Number.isFinite(px) || px <= 0) return;
+    const chg = pctMap[sym];
+    if (Number.isFinite(chg)) {
+      const cls = chg >= 0 ? "pos" : "neg";
+      const sign = chg >= 0 ? "+" : "";
+      el.innerHTML = `<strong>${sym}</strong> $${px.toFixed(2)} <span class="tape-pct ${cls}">${sign}${chg.toFixed(2)}%</span>`;
+    } else {
+      el.innerHTML = `<strong>${sym}</strong> $${px.toFixed(2)} <span class="tape-pct pos">LIVE</span>`;
+    }
+  });
+}
+
 function renderAll(snapshot) {
   if (!snapshot) return;
   state.snapshot = snapshot;
@@ -1813,6 +1857,7 @@ function renderAll(snapshot) {
     state.prices = (snapshot.prices.prices) ? snapshot.prices.prices : snapshot.prices;
   }
   renderTelemetry(snapshot.clock, snapshot.telemetry);
+  renderTickerTapeQuotes(snapshot.prices || state.prices, snapshot.watchlist);
   renderScanResults(snapshot.watchlist);
   renderPositions(snapshot.portfolio, state.prices);
   renderAlerts(snapshot.alerts);
@@ -2294,8 +2339,7 @@ document.addEventListener("DOMContentLoaded", () => {
     switchPage(targetP);
   }
 
-  // Instant synchronous first paint of candlestick chart
-  drawExchangeChart("TSLA", { entry: 384.28, stop: 382.50, target: 386.06 }, { or_high: 387.80, or_low: 379.80 }, { curr_price: 385.46 });
+  // Paint clean loading canvas immediately, then hydrate from live pipeline + chart feed
   loadPipelineData(state.activeSymbol, state.usdAmount);
 
   // Start continuous Auckland local clock ticker (every second)

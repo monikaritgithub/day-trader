@@ -89,6 +89,84 @@ class TestAutoTrader(unittest.TestCase):
                 self.assertEqual(res["tiger_fee"], 0.25)
                 self.assertRegex(res["timestamp_nzdt"], r"^\d{4}-\d{2}-\d{2} ")
 
+    def test_run_cycle_active_orb_buys_then_flat_by_closes(self):
+        import json as _json
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp)
+            watchlist_p = p / "watchlist.json"
+            watchlist_p.write_text('{"mode":"orb","count":1,"results":[{"symbol":"TSLA","price":400.36}]}', encoding="utf-8")
+
+            def fake_subproc(cmd, *args, **kwargs):
+                script = " ".join(str(x) for x in cmd)
+                if "entry.py" in script:
+                    payload = {"symbol": "TSLA", "triggered": True, "trigger": {"price": 396.01}}
+                elif "exit.py" in script:
+                    payload = {"symbol": "TSLA", "stop": 389.95, "target": 408.13, "reward_risk": 2.0}
+                elif "size.py" in script:
+                    payload = {"symbol": "TSLA", "shares": 0.0631, "usd": 24.99, "passed": True}
+                elif "check.py" in script:
+                    payload = {"passed": 1, "blocked": 0, "orders": [{"symbol": "TSLA", "status": "PASS"}]}
+                else:
+                    payload = {}
+                return mock.Mock(returncode=0, stdout=_json.dumps(payload), stderr="")
+
+            import zoneinfo
+            ny_tz = zoneinfo.ZoneInfo("America/New_York")
+            nz_tz = zoneinfo.ZoneInfo("Pacific/Auckland")
+            open_utc = datetime.datetime(2026, 11, 25, 15, 30, tzinfo=datetime.timezone.utc)
+            flat_utc = datetime.datetime(2026, 11, 25, 20, 56, tzinfo=datetime.timezone.utc)
+            open_orb_times = {
+                "utc_now": open_utc,
+                "ny_dt": open_utc.astimezone(ny_tz),
+                "nz_dt": open_utc.astimezone(nz_tz),
+                "nz_time_str": "2026-11-26 04:30:00 AM NZDT",
+                "nz_date_str": "2026-11-26",
+                "ny_time_str": "2026-11-25 10:30:00 AM ET",
+                "is_weekday_ny": True,
+                "is_market_open": True,
+                "is_orb_trading_active": True,
+                "is_flat_by_time": False,
+                "is_close_reporting_time": False,
+                "flat_by_str": "15:55",
+            }
+            flat_times = dict(open_orb_times, **{
+                "utc_now": flat_utc,
+                "ny_dt": flat_utc.astimezone(ny_tz),
+                "nz_dt": flat_utc.astimezone(nz_tz),
+                "nz_time_str": "2026-11-26 09:56:00 AM NZDT",
+                "ny_time_str": "2026-11-25 03:56:00 PM ET",
+                "is_orb_trading_active": False,
+                "is_flat_by_time": True,
+                "is_close_reporting_time": True,
+            })
+
+            with mock.patch("trader.auto_trader.PORTFOLIO_FILE", p / "portfolio.json"), \
+                 mock.patch("trader.auto_trader.HISTORY_FILE", p / "trade_history.json"), \
+                 mock.patch("trader.auto_trader.ALERTS_FILE", p / "alerts.json"), \
+                 mock.patch("trader.auto_trader.WATCHLIST_FILE", watchlist_p), \
+                 mock.patch("trader.auto_trader.AUTOTRADER_STATE_FILE", p / "autotrader_state.json"), \
+                 mock.patch("trader.auto_trader.CONFIG_FILE", p / "config.json"), \
+                 mock.patch("trader.auto_trader.subprocess.run", side_effect=fake_subproc), \
+                 mock.patch("trader.auto_trader.resolve_real_market_price", return_value=400.36), \
+                 mock.patch("trader.auto_trader.send_daily_market_close_report", return_value={"status": "mocked"}), \
+                 mock.patch("trader.auto_trader.get_all_11_skills_approved_stocks", return_value=[{
+                     "symbol": "TSLA", "status": "APPROVED", "entry": 396.01, "stop": 389.95, "target": 408.13, "price": 400.36
+                 }]):
+                with mock.patch.object(self.engine, "get_market_times", return_value=open_orb_times):
+                    buy_cycle = self.engine.run_cycle()
+                self.assertEqual(buy_cycle["status"], "cycle_completed")
+                self.assertEqual(buy_cycle["open_positions"], 1)
+                self.assertLess(buy_cycle["cash"], 200.0)
+
+                with mock.patch.object(self.engine, "get_market_times", return_value=flat_times):
+                    flat_cycle = self.engine.run_cycle()
+                self.assertEqual(flat_cycle["open_positions"], 0)
+                hist = _json.loads((p / "trade_history.json").read_text(encoding="utf-8"))
+                self.assertEqual(len(hist["trades"]), 2)
+                self.assertEqual(set(t["side"] for t in hist["trades"]), {"BUY", "SELL"})
+                sell_trade = next(t for t in hist["trades"] if t["side"] == "SELL")
+                self.assertIn("Flat-by-Close", sell_trade.get("exit_reason", ""))
+
 
 if __name__ == "__main__":
     unittest.main()

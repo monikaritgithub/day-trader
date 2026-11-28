@@ -1,0 +1,55 @@
+name: Autonomous US Market Cycle & Live Pages Sync
+
+on:
+  schedule:
+    # Every 15 minutes during US market hours Mon-Fri (13:00-22:59 UTC covers EDT & EST 09:00-17:59 ET)
+    - cron: '*/15 13-22 * * 1-5'
+    # Pre-market / overnight sync once daily at 03:00 UTC
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  live-cycle:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && pip install -r requirements.txt
+
+      - name: Run US Market Scan, 11-Skill Auto-Analysis & AutoTrader Cycle
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          NOTIFICATION_EMAIL: ${{ secrets.NOTIFICATION_EMAIL }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          SEC_USER_AGENT: "DayTraderPro Autonomous research@daytraderpro.local"
+          AUTO_TRADING_ENABLED: "true"
+        run: |
+          python trader/publish_live_state.py --scan-batch 200
+
+      - name: Commit and push updated live market state
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f docs/live_state.json
+          git add trader/portfolio.json trader/trade_history.json trader/watchlist.json trader/prices.json 2>/dev/null || true
+          if ! git diff --staged --quiet; then
+            git commit -m "chore: live market scan, 11-skill analysis & autonomous cycle sync"
+            git checkout -- trader/alerts.json trader/entry.json trader/orders.json trader/plan.json trader/state/ 2>/dev/null || true
+            git pull --rebase origin main || true
+            git push origin main
+          else
+            echo "No live state changes to commit."
+          fi

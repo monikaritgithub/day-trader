@@ -1,10 +1,10 @@
 {
   "created_by": "trader-scanner",
-  "created_at": "2026-11-25T05:27:34Z",
+  "created_at": "2026-11-28T03:41:24Z",
   "mode": "daily",
-  "as_of": "2026-11-24 close",
-  "universe": 10,
-  "scanned": 10,
+  "as_of": "2026-11-27 close",
+  "universe": 5902,
+  "scanned": 61,
   "failed": 0,
   "source": "yahoo",
   "filters": {
@@ -12,5 +12,262 @@
     "min_volume": 1000000
   },
   "note": "A scan is a list of charts that match a rule, not a list of stocks to buy.",
-  "hits": []
+  "hits": [
+    {
+      "symbol": "TSLA",
+      "setups": [
+        "reclaim_ma20"
+      ],
+      "price": 400.0,
+      "close_date": "2026-11-27",
+      "rsi": 56.4,
+      "volume": 26634592,
+      "signal": "BUY",
+      "signal_label": "BUY (RECLAIM MA20)",
+      "signal_color": "jade",
+      "approved": true,
+      "approval_note": "Approved: Setup geometry & liquidity ($5+) verified"
+    },
+    {
+      "symbol": "AAPL",
+      "setups": [
+        "breakout_20d"
+      ],
+      "price": 358.54,
+      "close_date": "2026-11-27",
+      "rsi": 60.2,
+      "volume": 22683910,
+      "signal": "BUY",
+      "signal_label": "BUY (BREAKOUT 20D)",
+      "signal_color": "jade",
+      "approved": true,
+      "approval_note": "Approved: Setup geometry & liquidity ($5+) verified"
+    },
+    {
+      "symbol": "META",
+      "setups": [
+        "reclaim_ma20"
+      ],
+      "price": 628.96,
+      "close_date": "2026-11-27",
+      "rsi": 50.6,
+      "volume": 11143475,
+      "signal": "BUY",
+      "signal_label": "BUY (RECLAIM MA20)",
+      "signal_color": "jade",
+      "approved": true,
+      "approval_note": "Approved: Setup geometry & liquidity ($5+) verified"
+    },
+    {
+      "symbol": "AVGO",
+      "setups": [
+        "bull_flag"
+      ],
+      "price": 312.34,
+      "close_date": "2026-11-27",
+      "rsi": 44.7,
+      "volume": 17091992,
+      "signal": "HOLD",
+      "signal_label": "MONITOR",
+      "signal_color": "amber",
+      "approved": false,
+      "approval_note": "Awaiting confirmed 15m breakout trigger"
+    },
+    {
+      "symbol": "PLTR",
+      "setups": [
+        "reclaim_ma20"
+      ],
+      "price": 172.17,
+      "close_date": "2026-11-27",
+      "rsi": 51.2,
+      "volume": 15054529,
+      "signal": "BUY",
+      "signal_label": "BUY (RECLAIM MA20)",
+      "signal_color": "jade",
+      "approved": true,
+      "approval_note": "Approved: Setup geometry & liquidity ($5+) verified"
+    },
+    {
+      "symbol": "ABNB",
+      "setups": [
+        "reclaim_ma20"
+      ],
+      "price": 179.16,
+      "close_date": "2026-11-27",
+      "rsi": 53.3,
+      "volume": 5995651,
+      "signal": "BUY",
+      "signal_label": "BUY (RECLAIM MA20)",
+      "signal_color": "jade",
+      "approved": true,
+      "approval_note": "Approved: Setup geometry & liquidity ($5+) verified"
+    },
+    {
+      "symbol": "COIN",
+      "setups": [
+        "oversold_bounce"
+      ],
+      "price": 107.04,
+      "close_date": "2026-11-27",
+      "rsi": 31.9,
+      "volume": 5162494,
+      "signal": "BUY",
+      "signal_label": "BUY (OVERSOLD BOUNCE)",
+      "signal_color": "jade",
+      "approved": true,
+      "approval_note": "Approved: Setup geometry & liquidity ($5+) verified"
+    },
+    {
+      "symbol": "PYPL",
+      "setups": [
+        "reclaim_ma20"
+      ],
+      "price": 59.14,
+      "close_date": "2026-11-27",
+      "rsi": 56.6,
+      "volume": 5571529,
+      "signal": "BUY",
+      "signal_label": "BUY (RECLAIM MA20)",
+      "signal_color": "jade",
+      "approved": true,
+      "approval_note": "Approved: Setup geometry & liquidity ($5+) verified"
+    },
+    {
+      "symbol": "AGNC",
+      "setups": [
+        "reclaim_ma20"
+      ],
+      "price": 8.36,
+      "close_date": "2026-11-27",
+      "rsi": 47.7,
+      "volume": 16930374,
+      "signal": "BUY",
+      "signal_label": "BUY (RECLAIM MA20)",
+      "signal_color": "jade",
+      "approved": true,
+      "approval_note": "Approved: Setup geometry & liquidity ($5+) verified"
+    },
+    {
+      "symbol": "GME",
+      "setups": [
+        "bull_flag"
+      ],
+      "price": 26.34,
+      "close_date": "2026-11-27",
+      "rsi": 55.4,
+      "volume": 3052457,
+      "signal": "HOLD",
+      "signal_label": "MONITOR",
+      "signal_color": "amber",
+      "approved": false,
+      "approval_note": "Awaiting confirmed 15m breakout trigger"
+    },
+    {
+      "symbol": "AEHL",
+      "setups": [
+        "reclaim_ma20"
+      ],
+      "price": 12.9,
+      "close_date": "2026-11-27",
+      "rsi": 62.1,
+      "volume": 5121748,
+      "signal": "BUY",
+      "signal_label": "BUY (RECLAIM MA20)",
+      "signal_color": "jade",
+      "approved": true,
+      "approval_note": "Approved: Setup geometry & liquidity ($5+) verified"
+    },
+    {
+      "symbol": "ADT",
+      "setups": [
+        "breakout_20d"
+      ],
+      "price": 9.95,
+      "close_date": "2026-11-27",
+      "rsi": 82.2,
+      "volume": 6623291,
+      "signal": "BUY",
+      "signal_label": "BUY (BREAKOUT 20D)",
+      "signal_color": "jade",
+      "approved": true,
+      "approval_note": "Approved: Setup geometry & liquidity ($5+) verified"
+    },
+    {
+      "symbol": "AHR",
+      "setups": [
+        "breakout_20d"
+      ],
+      "price": 60.3,
+      "close_date": "2026-11-27",
+      "rsi": 68.9,
+      "volume": 1048484,
+      "signal": "BUY",
+      "signal_label": "BUY (BREAKOUT 20D)",
+      "signal_color": "jade",
+      "approved": true,
+      "approval_note": "Approved: Setup geometry & liquidity ($5+) verified"
+    },
+    {
+      "symbol": "ABSI",
+      "setups": [
+        "reclaim_ma20"
+      ],
+      "price": 9.56,
+      "close_date": "2026-11-27",
+      "rsi": 52.6,
+      "volume": 2042498,
+      "signal": "BUY",
+      "signal_label": "BUY (RECLAIM MA20)",
+      "signal_color": "jade",
+      "approved": true,
+      "approval_note": "Approved: Setup geometry & liquidity ($5+) verified"
+    },
+    {
+      "symbol": "AEG",
+      "setups": [
+        "reclaim_ma20"
+      ],
+      "price": 8.58,
+      "close_date": "2026-11-27",
+      "rsi": 55.7,
+      "volume": 2174210,
+      "signal": "BUY",
+      "signal_label": "BUY (RECLAIM MA20)",
+      "signal_color": "jade",
+      "approved": true,
+      "approval_note": "Approved: Setup geometry & liquidity ($5+) verified"
+    },
+    {
+      "symbol": "ALC",
+      "setups": [
+        "breakout_20d"
+      ],
+      "price": 78.59,
+      "close_date": "2026-11-27",
+      "rsi": 69.0,
+      "volume": 1568982,
+      "signal": "BUY",
+      "signal_label": "BUY (BREAKOUT 20D)",
+      "signal_color": "jade",
+      "approved": true,
+      "approval_note": "Approved: Setup geometry & liquidity ($5+) verified"
+    },
+    {
+      "symbol": "AMBA",
+      "setups": [
+        "oversold"
+      ],
+      "price": 35.24,
+      "close_date": "2026-11-27",
+      "rsi": 25.5,
+      "volume": 2948573,
+      "signal": "HOLD",
+      "signal_label": "MONITOR",
+      "signal_color": "amber",
+      "approved": false,
+      "approval_note": "Awaiting confirmed 15m breakout trigger"
+    }
+  ],
+  "universe_cursor": 200
 }

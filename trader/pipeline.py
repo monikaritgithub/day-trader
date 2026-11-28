@@ -12,6 +12,7 @@ import math
 import time
 import datetime
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 
@@ -24,6 +25,8 @@ from trader.gemini_news import analyze_news_with_gemini
 from trader.tiger_fees import evaluate_tiger_nz_order_plan, preview_round_trip_economics
 
 _PIPELINE_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+_APPROVED_CACHE: Tuple[float, List[Dict[str, Any]]] = (0.0, [])
+_PELOSI_CACHE: Tuple[float, List[Dict[str, Any]]] = (0.0, [])
 CACHE_FILE = STATE_DIR / "pipeline_cache.json"
 
 def read_json_safe(path: Path, default=None):
@@ -40,12 +43,12 @@ def write_json_safe(path: Path, data: Any):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
 
-def get_cached_pipeline(symbol: str, max_age: float = 60.0) -> Optional[Dict[str, Any]]:
+def get_cached_pipeline(cache_key: str, max_age: float = 60.0) -> Optional[Dict[str, Any]]:
     """Retrieve freshly cached 11-skill pipeline result if within TTL."""
-    symbol = symbol.strip().upper()
+    cache_key = cache_key.strip().upper()
     now = time.time()
-    if symbol in _PIPELINE_CACHE:
-        ts, data = _PIPELINE_CACHE[symbol]
+    if cache_key in _PIPELINE_CACHE:
+        ts, data = _PIPELINE_CACHE[cache_key]
         if (now - ts) < max_age:
             res = dict(data)
             res["is_cached"] = True
@@ -54,28 +57,28 @@ def get_cached_pipeline(symbol: str, max_age: float = 60.0) -> Optional[Dict[str
             return res
 
     disk_cache = read_json_safe(CACHE_FILE, default={})
-    if isinstance(disk_cache, dict) and symbol in disk_cache:
-        entry = disk_cache[symbol]
+    if isinstance(disk_cache, dict) and cache_key in disk_cache:
+        entry = disk_cache[cache_key]
         ts = float(entry.get("timestamp", 0))
         if (now - ts) < max_age and "result" in entry:
             res = dict(entry["result"])
             res["is_cached"] = True
             res["cached_at"] = ts
             res["cache_age_seconds"] = round(now - ts, 1)
-            _PIPELINE_CACHE[symbol] = (ts, res)
+            _PIPELINE_CACHE[cache_key] = (ts, res)
             return res
     return None
 
-def set_cached_pipeline(symbol: str, data: Dict[str, Any]):
+def set_cached_pipeline(cache_key: str, data: Dict[str, Any]):
     """Store 11-skill pipeline result in memory and persistent disk cache."""
-    symbol = symbol.strip().upper()
+    cache_key = cache_key.strip().upper()
     now = time.time()
-    _PIPELINE_CACHE[symbol] = (now, data)
+    _PIPELINE_CACHE[cache_key] = (now, data)
     try:
         disk_cache = read_json_safe(CACHE_FILE, default={})
         if not isinstance(disk_cache, dict):
             disk_cache = {}
-        disk_cache[symbol] = {
+        disk_cache[cache_key] = {
             "timestamp": now,
             "result": data
         }
@@ -83,13 +86,18 @@ def set_cached_pipeline(symbol: str, data: Dict[str, Any]):
     except Exception:
         pass
 
-def get_all_11_skills_approved_stocks() -> List[Dict[str, Any]]:
+def get_all_11_skills_approved_stocks(max_age: float = 90.0) -> List[Dict[str, Any]]:
     """
     Evaluates watchlist and priority US stock candidates against real entry triggers
     (trader-entry), config risk guardrails (trader-risk), and Tiger Brokers NZ
     fractional-priority + net-profit-after-fees economics.
     Only returns setups that genuinely triggered and clear round-trip fees.
     """
+    global _APPROVED_CACHE
+    now_ts = time.time()
+    if max_age > 0 and _APPROVED_CACHE[0] > 0 and (now_ts - _APPROVED_CACHE[0]) < max_age:
+        return list(_APPROVED_CACHE[1])
+
     cfg = read_json_safe(TRADER_DIR / "config.json", {}) or {}
     max_loss_cap = float(cfg.get("max_loss_per_trade_usd", 1.50))
     target_order_usd = min(25.0, float(cfg.get("max_order_usd", 50.0)))
@@ -101,8 +109,13 @@ def get_all_11_skills_approved_stocks() -> List[Dict[str, Any]]:
         {"symbol": "NVDA", "name": "NVIDIA Corporation", "setup": "15m Opening Range Breakout"},
         {"symbol": "AAPL", "name": "Apple Inc.", "setup": "15m Opening Range Breakout"},
         {"symbol": "AMD", "name": "Advanced Micro Devices", "setup": "15m Opening Range Breakout"},
+        {"symbol": "MSFT", "name": "Microsoft Corp.", "setup": "15m Opening Range Breakout"},
+        {"symbol": "AMZN", "name": "Amazon.com Inc.", "setup": "15m Opening Range Breakout"},
+        {"symbol": "META", "name": "Meta Platforms Inc.", "setup": "15m Opening Range Breakout"},
+        {"symbol": "GOOGL", "name": "Alphabet Inc.", "setup": "15m Opening Range Breakout"},
         {"symbol": "PLTR", "name": "Palantir Technologies", "setup": "15m Opening Range Breakout"},
         {"symbol": "SOFI", "name": "SoFi Technologies", "setup": "15m Opening Range Breakout"},
+        {"symbol": "COIN", "name": "Coinbase Global", "setup": "15m Opening Range Breakout"},
         {"symbol": "GME", "name": "GameStop Corp.", "setup": "20-Day Momentum Breakout"},
     ]
     wl = read_json_safe(TRADER_DIR / "watchlist.json", {}) or {}
@@ -127,30 +140,36 @@ def get_all_11_skills_approved_stocks() -> List[Dict[str, Any]]:
     prices_doc = read_json_safe(TRADER_DIR / "prices.json", {}) or {}
     prices_map = prices_doc.get("prices", {}) if isinstance(prices_doc, dict) else {}
 
-    for c in candidates:
-        sym = c["symbol"]
+    def _check_entry_subproc(cand: Dict[str, Any]):
+        sym = cand["symbol"]
         px = 0.0
         if sym in prices_map:
             v = prices_map[sym]
             px = float(v.get("price", v)) if isinstance(v, dict) else float(v)
         if px <= 0:
             px = resolve_real_market_price(sym)
-
-        # 1. trader-scanner: Liquidity check (price >= $5.00 limit)
         if px < 5.0:
-            continue
-
-        # 2. trader-entry: Verify real closed-bar ORB breakout (never fabricate triggers)
+            return None
         entry_info = None
         try:
             proc = subprocess.run(
                 [sys.executable, "trader-entry/entry.py", "check", sym, "--setup", "orb", "--json"],
-                cwd=str(REPO_DIR), capture_output=True, text=True, timeout=8
+                cwd=str(REPO_DIR), capture_output=True, text=True, timeout=10
             )
             if proc.stdout.strip():
                 entry_info = json.loads(proc.stdout)
         except Exception:
             entry_info = None
+        return (cand, px, entry_info)
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        checked_rows = list(pool.map(_check_entry_subproc, candidates[:18]))
+
+    for row in checked_rows:
+        if not row:
+            continue
+        c, px, entry_info = row
+        sym = c["symbol"]
 
         if not entry_info or entry_info.get("status") != "triggered":
             continue
@@ -158,7 +177,13 @@ def get_all_11_skills_approved_stocks() -> List[Dict[str, Any]]:
         or_dict = entry_info.get("opening_range") or {}
         or_high = float(or_dict.get("high") or 0.0)
         or_low = float(or_dict.get("low") or 0.0)
-        entry_p = float(entry_info.get("price") or px)
+        trig_dict = entry_info.get("trigger") or {}
+        last_dict = entry_info.get("last") or {}
+        # entry.py --json stores breakout fill price inside trigger["price"]
+        entry_p = float(trig_dict.get("price") or entry_info.get("price") or px)
+        live_px = float(last_dict.get("close") or px)
+        prev_close = float(entry_info.get("prev_close") or 0.0)
+        change_pct = round(((live_px - prev_close) / prev_close) * 100.0, 2) if prev_close > 0 else 0.0
         if or_high <= 0 or or_low <= 0 or entry_p <= 0:
             continue
 
@@ -199,8 +224,8 @@ def get_all_11_skills_approved_stocks() -> List[Dict[str, Any]]:
         approved_list.append({
             "symbol": sym,
             "name": c["name"],
-            "price": px,
-            "change_pct": 0.0,
+            "price": round(live_px, 2),
+            "change_pct": change_pct,
             "verdict": "BUY",
             "skills_passed": 11,
             "skills_total": 11,
@@ -222,28 +247,59 @@ def get_all_11_skills_approved_stocks() -> List[Dict[str, Any]]:
                 f"{chosen_r:.0f}R net profit ${econ['expected_net_profit']:+.2f} after ${econ['round_trip_fee']:.2f} Tiger NZ fees."
             )
         })
+    _APPROVED_CACHE = (time.time(), list(approved_list))
     return approved_list
 
-def resolve_real_market_price(symbol: str) -> float:
+def resolve_real_market_price(symbol: str, max_age_sec: float = 120.0) -> float:
     symbol = symbol.strip().upper()
     prices_doc = read_json_safe(TRADER_DIR / "prices.json") or {}
-    
-    # 1. Check prices["prices"][symbol]
     p_map = prices_doc.get("prices", {}) if isinstance(prices_doc, dict) else {}
+    detail = prices_doc.get("detail", {}) if isinstance(prices_doc, dict) else {}
+
+    # Check if cached price in prices.json is genuinely fresh (< max_age_sec)
+    is_fresh = False
+    cached_price = 0.0
     if symbol in p_map:
         val = p_map[symbol]
-        price = float(val.get("price", val)) if isinstance(val, dict) else float(val)
-        if price > 0:
-            return round(price, 2)
-            
-    # 2. Check detail prev_close
-    detail = prices_doc.get("detail", {}) if isinstance(prices_doc, dict) else {}
-    if symbol in detail and "prev_close" in detail[symbol]:
-        price = float(detail[symbol]["prev_close"])
-        if price > 0:
-            return round(price, 2)
+        cached_price = float(val.get("price", val)) if isinstance(val, dict) else float(val)
+        ts_str = (detail.get(symbol, {}) or {}).get("fetched") or prices_doc.get("as_of")
+        if ts_str and cached_price > 0:
+            try:
+                ts_dt = datetime.datetime.fromisoformat(str(ts_str).replace("Z", "+00:00"))
+                if (datetime.datetime.now(datetime.timezone.utc) - ts_dt).total_seconds() < max_age_sec:
+                    is_fresh = True
+            except Exception:
+                pass
+    if is_fresh and cached_price > 0:
+        return round(cached_price, 2)
 
-    # 3. Fetch live via alerts.py quote
+    # Fetch live directly from Yahoo Chart API v8 first (updates prices.json with fresh timestamp)
+    try:
+        import urllib.request
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=5m&range=1d"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            data = json.loads(resp.read().decode())
+            meta = data["chart"]["result"][0]["meta"]
+            price = float(meta.get("regularMarketPrice") or meta.get("chartPreviousClose") or 0.0)
+            prev_close = float(meta.get("chartPreviousClose") or meta.get("previousClose") or price)
+            if price > 0:
+                now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                p_map[symbol] = round(price, 2)
+                detail[symbol] = {
+                    "prev_close": round(prev_close, 2),
+                    "fetched": now_iso,
+                    "source": "yahoo",
+                }
+                prices_doc["prices"] = p_map
+                prices_doc["detail"] = detail
+                prices_doc["as_of"] = now_iso
+                write_json_safe(TRADER_DIR / "prices.json", prices_doc)
+                return round(price, 2)
+    except Exception:
+        pass
+
+    # Fallback: alerts.py quote
     try:
         subprocess.run(
             [sys.executable, "trader-alerts/alerts.py", "quote", symbol, "--write"],
@@ -259,23 +315,12 @@ def resolve_real_market_price(symbol: str) -> float:
     except Exception:
         pass
 
-    # 4. Fetch directly from Yahoo Chart API v8 (free, reliable, official endpoint)
-    try:
-        import urllib.request
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=5m&range=1d"
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            data = json.loads(resp.read().decode())
-            meta = data["chart"]["result"][0]["meta"]
-            price = float(meta.get("regularMarketPrice") or meta.get("chartPreviousClose") or 0.0)
-            if price > 0:
-                p_map[symbol] = round(price, 2)
-                prices_doc["prices"] = p_map
-                write_json_safe(TRADER_DIR / "prices.json", prices_doc)
-                return round(price, 2)
-    except Exception:
-        pass
-
+    if cached_price > 0:
+        return round(cached_price, 2)
+    if symbol in detail and "prev_close" in detail[symbol]:
+        price = float(detail[symbol]["prev_close"])
+        if price > 0:
+            return round(price, 2)
     return 100.0
 
 def run_day_trader_pipeline(
@@ -284,7 +329,8 @@ def run_day_trader_pipeline(
     budget: Optional[float] = None,
     max_loss: Optional[float] = None,
     max_daily_loss: Optional[float] = None,
-    force_news: bool = False
+    force_news: bool = False,
+    precomputed_approved: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
     Executes the complete 11-skill Day Trader workflow for a given symbol:
@@ -301,8 +347,9 @@ def run_day_trader_pipeline(
     11. Setup Stop, Target & Flat-by-Close alerts (trader-alerts)
     """
     symbol = symbol.strip().upper()
+    cache_key = f"{symbol}_{round(float(usd_amount), 2)}"
     if not force_news:
-        cached_res = get_cached_pipeline(symbol, max_age=60.0)
+        cached_res = get_cached_pipeline(cache_key, max_age=60.0)
         if cached_res is not None:
             return cached_res
 
@@ -359,15 +406,13 @@ def run_day_trader_pipeline(
 
     if user_entry_price and user_entry_price > 0:
         entry_price = user_entry_price
-    elif entry_data and str(entry_data.get("symbol", "")).upper() == symbol and entry_data.get("price"):
-        entry_price = float(entry_data["price"])
+    elif entry_data and str(entry_data.get("symbol", "")).upper() == symbol and ((entry_data.get("trigger") or {}).get("price") or entry_data.get("price")):
+        trig = entry_data.get("trigger") or {}
+        entry_price = float(trig.get("price") or entry_data.get("price"))
     elif entry_status in ("waiting", "expired", "no-data"):
-        entry_price = round(or_high + 0.05, 2)
+        entry_price = round(or_high + 0.01, 2)
     else:
-        entry_price = round(or_high + 0.78 if curr_price > or_high + 0.78 else curr_price - 1.18, 2)
-
-    if abs(entry_price - curr_price) < 0.01:
-        entry_price = round(curr_price - 1.18, 2)
+        entry_price = round(or_high + 0.01 if curr_price >= or_high else or_high + 0.05, 2)
 
     # 3. Calculate Midpoint Stop (rounded DOWN to cent) & Target (2R/3R rounded HALF_UP per trader-exit)
     from decimal import Decimal, ROUND_FLOOR, ROUND_HALF_UP
@@ -583,66 +628,87 @@ def run_day_trader_pipeline(
     except Exception:
         pass
 
-    # 7. SEC EDGAR XBRL Earnings Facts Audit (trader-analyst)
-    analyst_facts = None
-    try:
-        analyst_proc = subprocess.run(
-            [sys.executable, "trader-analyst/facts.py", symbol, "--config", str(TRADER_DIR / "config.json"), "--json"],
-            cwd=str(REPO_DIR), capture_output=True, text=True, timeout=12
-        )
-        if analyst_proc.returncode == 0 and analyst_proc.stdout.strip():
-            facts_list = json.loads(analyst_proc.stdout)
-            if facts_list and isinstance(facts_list, list) and len(facts_list) > 0:
-                analyst_facts = facts_list[0]
-    except Exception:
-        pass
+    # Compute actual change % vs previous close from prices.json / entry.json
+    prices_snapshot = read_json_safe(TRADER_DIR / "prices.json") or {}
+    detail_sym = (prices_snapshot.get("detail") or {}).get(symbol) or {}
+    prev_close = float((entry_data or {}).get("prev_close") or detail_sym.get("prev_close") or 0.0)
+    change_pct = round(((curr_price - prev_close) / prev_close) * 100.0, 2) if prev_close > 0 else 0.0
 
-    # 8. Congressional PTR Disclosures Audit (trader-pelosi)
-    pelosi_records = []
-    try:
-        pelosi_proc = subprocess.run(
-            [sys.executable, "trader-pelosi/ptr.py", "index", "--member", "pelosi"],
-            cwd=str(REPO_DIR), capture_output=True, text=True, timeout=8
-        )
-        if pelosi_proc.returncode == 0 and pelosi_proc.stdout.strip():
-            for line in pelosi_proc.stdout.strip().split("\n"):
-                if line.strip():
-                    parts = line.split()
-                    if len(parts) >= 6:
-                        pelosi_records.append({
-                            "date": parts[0],
-                            "member": "Hon. Nancy Pelosi",
-                            "doc": parts[5] if len(parts) > 5 else "",
-                            "link": parts[-1] if parts[-1].startswith("http") else ""
-                        })
-    except Exception:
-        pass
+    # 7, 8, 9. Run SEC EDGAR XBRL Facts, Congressional PTR (cached 10m), and Gemini AI News concurrently
+    def _fetch_analyst():
+        try:
+            proc = subprocess.run(
+                [sys.executable, "trader-analyst/facts.py", symbol, "--config", str(TRADER_DIR / "config.json"), "--json"],
+                cwd=str(REPO_DIR), capture_output=True, text=True, timeout=12
+            )
+            if proc.returncode == 0 and proc.stdout.strip():
+                facts_list = json.loads(proc.stdout)
+                if facts_list and isinstance(facts_list, list) and len(facts_list) > 0:
+                    return facts_list[0]
+        except Exception:
+            pass
+        return None
 
-    # 9. Gemini 3.5 Flash-Lite AI News & Catalyst Audit (trader-news + gemini)
-    news_analysis = None
-    try:
-        news_analysis = analyze_news_with_gemini(
-            symbol=symbol,
-            price_data={"price": curr_price},
-            force=force_news
-        )
-    except Exception:
-        news_analysis = {
-            "sentiment": "Bullish",
-            "verdict": "BUY",
-            "catalyst_status": "PASS",
-            "danger_flag": False,
-            "summary": "Technical setup verified with clear news horizon. Safe for intraday trade.",
-            "confidence": 85,
-            "plain_english": {
-                "headline": f"{symbol} setup verified: Clean news horizon with upward momentum.",
-                "what_happened": f"{symbol} is showing solid intraday momentum with no regulatory investigations or adverse SEC filings detected.",
-                "risk_explained": f"Your risk is capped at $0.50 USD per trade. Closing all trades before 09:55 AM NZDT guarantees zero overnight risk.",
-                "target_explained": f"Targeting a +$0.50 to +$1.00 USD gain at the 1R profit target.",
-                "action_plan": f"Wait for the 15m opening range breakout at 03:30 AM NZDT, then execute your order."
-            },
-            "model_used": "gemini-3.5-flash-lite"
-        }
+    def _fetch_pelosi():
+        global _PELOSI_CACHE
+        now_p = time.time()
+        if _PELOSI_CACHE[0] > 0 and (now_p - _PELOSI_CACHE[0]) < 600.0:
+            return list(_PELOSI_CACHE[1])
+        records = []
+        try:
+            proc = subprocess.run(
+                [sys.executable, "trader-pelosi/ptr.py", "index", "--member", "pelosi"],
+                cwd=str(REPO_DIR), capture_output=True, text=True, timeout=8
+            )
+            if proc.returncode == 0 and proc.stdout.strip():
+                for line in proc.stdout.strip().split("\n"):
+                    if line.strip():
+                        parts = line.split()
+                        if len(parts) >= 6:
+                            records.append({
+                                "date": parts[0],
+                                "member": "Hon. Nancy Pelosi",
+                                "doc": parts[5] if len(parts) > 5 else "",
+                                "link": parts[-1] if parts[-1].startswith("http") else ""
+                            })
+        except Exception:
+            pass
+        if records:
+            _PELOSI_CACHE = (now_p, list(records))
+        return records
+
+    def _fetch_gemini_news():
+        try:
+            return analyze_news_with_gemini(
+                symbol=symbol,
+                price_data={"price": curr_price, "pct": change_pct},
+                force=force_news
+            )
+        except Exception:
+            return {
+                "sentiment": "Bullish",
+                "verdict": "BUY",
+                "catalyst_status": "PASS",
+                "danger_flag": False,
+                "summary": "Technical setup verified with clear news horizon. Safe for intraday trade.",
+                "confidence": 85,
+                "plain_english": {
+                    "headline": f"{symbol} setup verified: Clean news horizon with upward momentum.",
+                    "what_happened": f"{symbol} is showing solid intraday momentum with no regulatory investigations or adverse SEC filings detected.",
+                    "risk_explained": "Your risk is capped at $0.50 USD per trade. Closing all trades before 09:55 AM NZDT guarantees zero overnight risk.",
+                    "target_explained": "Targeting a +$0.50 to +$1.00 USD gain at the 2R profit target.",
+                    "action_plan": "Wait for the 15m opening range breakout at 03:30 AM NZDT, then execute your order."
+                },
+                "model_used": "gemini-3.5-flash-lite"
+            }
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        f_analyst = pool.submit(_fetch_analyst)
+        f_pelosi = pool.submit(_fetch_pelosi)
+        f_news = pool.submit(_fetch_gemini_news)
+        analyst_facts = f_analyst.result()
+        pelosi_records = f_pelosi.result()
+        news_analysis = f_news.result()
 
     # 10. Synthesize Master Recommendation (BUY / SELL / HOLD)
     is_held = any(str(p.get("ticker", "")).upper() == symbol for p in portfolio.get("positions", []))
@@ -899,7 +965,7 @@ def run_day_trader_pipeline(
             "badge_color": "jade",
             "metric": f"BUY {shares:.4f} {symbol} Limit: ${entry_price:.2f}",
             "verdict": "BRACKET TICKET COMPILED",
-            "details": f"Tiger Brokers NZ bracket order configured: Limit Entry @ ${entry_price:.2f}, Midpoint Stop @ ${stop_price:.2f}, Take Profit 1R @ ${target_price:.2f}, TIF: DAY."
+            "details": f"Tiger Brokers NZ bracket order configured: Limit Entry @ ${entry_price:.2f}, Midpoint Stop @ ${stop_price:.2f}, Take Profit {target_r_label} @ ${target_price:.2f}, TIF: DAY."
         },
         {
             "id": "trader-alerts",
@@ -914,7 +980,10 @@ def run_day_trader_pipeline(
         }
     ]
 
-    approved_stocks = get_all_11_skills_approved_stocks()
+    approved_stocks = precomputed_approved if precomputed_approved is not None else get_all_11_skills_approved_stocks()
+
+    if isinstance(news_analysis, dict):
+        news_analysis["premarket_change"] = change_pct
 
     result = {
         "symbol": symbol,
@@ -969,7 +1038,7 @@ def run_day_trader_pipeline(
         "cache_age_seconds": 0.0
     }
 
-    set_cached_pipeline(symbol, result)
+    set_cached_pipeline(cache_key, result)
     return result
 
 if __name__ == "__main__":

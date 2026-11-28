@@ -1,33 +1,48 @@
 /**
- * Static GitHub Pages Runtime Adapter for Day Trader Pro
- * Provides an interactive browser-side simulation of the 11-skill pipeline
- * and Tiger Brokers NZ Fractional Share Fee & Net-Profit Gate when hosted
- * without the local Python/aiohttp backend.
+ * Live-Data GitHub Pages Runtime Adapter for Day Trader Pro
+ * Hydrates live US market quotes, real Yahoo OHLCV charts, 11-skill auto-analysis,
+ * autonomous paper trades, and live RSS/SEC news from docs/live_state.json +
+ * browser-side CORS feeds (with optional remote/local PocketServer bridge).
  */
 (function () {
-  const isLocalBackend =
-    window.location.hostname === "localhost" ||
-    window.location.hostname === "127.0.0.1";
-  if (isLocalBackend) return;
+  const host = window.location.hostname || "";
+  const isPrivateLan = /^(localhost|127\.0\.0\.1|192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host);
+  if (isPrivateLan || window.location.port === "8080") return;
 
-  const STORAGE_KEY = "day_trader_pages_state_v1";
+  const origFetch = window.fetch.bind(window);
+  const STORAGE_KEY = "day_trader_pages_state_v2";
+  const STATION_URL_KEY = "day_trader_station_url";
+  const LIVE_NEWS_CACHE = new Map();
+  let liveState = null;
+  let liveStateLoadedAt = 0;
+  let liveStatePromise = null;
+
+  const NYSE_HOLIDAYS = new Set([
+    "2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25",
+    "2026-06-19", "2026-07-03", "2026-09-07", "2026-11-26", "2026-12-25",
+    "2027-01-01", "2027-01-18", "2027-02-15", "2027-03-26", "2027-05-31",
+    "2027-06-18", "2027-07-05", "2027-09-06", "2027-11-25", "2027-12-24",
+  ]);
+  const NYSE_EARLY_CLOSE = new Set(["2026-11-27", "2026-12-24", "2027-11-26"]);
+
   const PRICES = {
-    TSLA: 384.68,
-    NVDA: 155.38,
-    AAPL: 354.07,
-    AMD: 413.27,
-    PLTR: 161.18,
+    TSLA: 400.36,
+    NVDA: 150.62,
+    AAPL: 358.54,
+    AMD: 425.86,
+    PLTR: 172.17,
     SOFI: 12.86,
-    GME: 27.48,
+    GME: 26.34,
     MSFT: 496.13,
     AMZN: 255.39,
-    META: 597.60,
+    META: 628.96,
     GOOGL: 282.10,
-    COIN: 108.78,
+    COIN: 107.04,
     MARA: 5.58,
     INTC: 59.66,
     SMCI: 24.53,
   };
+  const PRICE_PCT = {};
 
   const NAMES = {
     TSLA: "Tesla, Inc.",
@@ -311,7 +326,7 @@
     if (risk <= 0 || target <= entry) {
       return { approved: false, shares: 0, economics: { expected_net_profit: 0, round_trip_fee: 0, breakeven_win_rate_pct: 100, reason: "Invalid stop/target geometry" } };
     }
-    const rawSh = Math.round((targetUsd / entry) * 10000) / 10000;
+    const rawSh = Math.floor((targetUsd / entry) * 10000 + 1e-9) / 10000;
     // Prioritize < 1 share fractional order when >= 1 share would trigger $1.99/leg minimums
     const sh = rawSh >= 1.0 && 0.999 * entry >= 1.0 ? 0.999 : rawSh;
     const buyFee = calcTigerNZFee("BUY", sh, entry, false).total_fee;
@@ -424,7 +439,175 @@
       second: "2-digit",
       hour12: true,
     }).format(now);
-    return { nzDate, nzTimeStr: `${nzDate} ${nzTime} NZDT` };
+    const syncedTs = liveState && liveState.generated_nzdt ? ` • Synced ${liveState.generated_nzdt}` : "";
+    return { nzDate, nzTimeStr: `${nzDate} ${nzTime} NZDT`, syncedTs };
+  }
+
+  function buildLiveMarketClock() {
+    const now = new Date();
+    const { nzTimeStr } = nzNowStrings();
+    const nyDate = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" }).format(now);
+    const nyParts = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/New_York",
+      weekday: "short",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }).formatToParts(now);
+    const getP = (t) => (nyParts.find((p) => p.type === t) || {}).value || "";
+    const nyHour = Number(getP("hour") || 0) % 24;
+    const nyMin = Number(getP("minute") || 0);
+    const nyMins = nyHour * 60 + nyMin;
+    const isWeekday = !["Sat", "Sun"].includes(getP("weekday"));
+    const isTradingDay = isWeekday && !NYSE_HOLIDAYS.has(nyDate);
+    const closeMins = NYSE_EARLY_CLOSE.has(nyDate) ? 13 * 60 : 16 * 60;
+    const isOpen = isTradingDay && nyMins >= 9 * 60 + 30 && nyMins < closeMins;
+    const syncLabel = liveState && liveState.generated_at
+      ? `Synced ${Math.max(0, Math.round((Date.now() - Date.parse(liveState.generated_at)) / 60000))}m ago`
+      : "Live Feed Active";
+
+    let nextOpenStr = "";
+    if (isOpen) {
+      const rem = closeMins - nyMins;
+      nextOpenStr = `LIVE MARKET OPEN (${Math.floor(rem / 60)}h ${rem % 60}m to close) • ${syncLabel}`;
+    } else {
+      // Find next open US trading session and convert 09:30 ET exactly into Pacific/Auckland time
+      const nextDate = new Date(now.getTime());
+      for (let d = 0; d < 7; d++) {
+        const candDate = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" }).format(nextDate);
+        const candWk = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", weekday: "short" }).format(nextDate);
+        if (!["Sat", "Sun"].includes(candWk) && !NYSE_HOLIDAYS.has(candDate)) {
+          if (d > 0 || nyMins < 9 * 60 + 30) {
+            const probe = new Date(`${candDate}T14:30:00Z`);
+            const pNyParts = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "2-digit", minute: "2-digit", hour12: false }).formatToParts(probe);
+            const pNyMins = (Number((pNyParts.find((p) => p.type === "hour") || {}).value || 9) % 24) * 60 + Number((pNyParts.find((p) => p.type === "minute") || {}).value || 30);
+            const openUtc = new Date(probe.getTime() + (9 * 60 + 30 - pNyMins) * 60000);
+            const nzOpenParts = new Intl.DateTimeFormat("en-US", {
+              timeZone: "Pacific/Auckland",
+              weekday: "short",
+              hour: "2-digit",
+              minute: "2-digit",
+              hour12: true,
+            }).formatToParts(openUtc);
+            const getNz = (t) => (nzOpenParts.find((p) => p.type === t) || {}).value || "";
+            const todayNz = new Intl.DateTimeFormat("en-CA", { timeZone: "Pacific/Auckland" }).format(now);
+            const openNzDate = new Intl.DateTimeFormat("en-CA", { timeZone: "Pacific/Auckland" }).format(openUtc);
+            const tmrwNz = new Intl.DateTimeFormat("en-CA", { timeZone: "Pacific/Auckland" }).format(new Date(now.getTime() + 86400000));
+            const dayLbl = openNzDate === todayNz ? "Today" : openNzDate === tmrwNz ? "Tomorrow" : getNz("weekday");
+            nextOpenStr = `Opens ${dayLbl} ${getNz("hour")}:${getNz("minute")} ${getNz("dayPeriod")} NZDT • ${syncLabel}`;
+            break;
+          }
+        }
+        nextDate.setUTCDate(nextDate.getUTCDate() + 1);
+      }
+      if (!nextOpenStr) nextOpenStr = `Opens 03:30 AM NZDT • ${syncLabel}`;
+    }
+    return { is_open: isOpen, nz_time_str: nzTimeStr, next_open: nextOpenStr };
+  }
+
+  function hydratePricesFromLiveState() {
+    if (!liveState) return;
+    const pMap = (liveState.prices && liveState.prices.prices) || {};
+    const detail = (liveState.prices && liveState.prices.detail) || {};
+    for (const [sym, val] of Object.entries(pMap)) {
+      const num = typeof val === "object" ? Number(val.price) : Number(val);
+      if (num > 0) PRICES[sym] = Math.round(num * 100) / 100;
+    }
+    for (const [sym, d] of Object.entries(detail)) {
+      if (d && Number.isFinite(Number(d.pct))) {
+        PRICE_PCT[sym] = Number(d.pct);
+      }
+    }
+    if (liveState.watchlist && Array.isArray(liveState.watchlist.hits)) {
+      for (const h of liveState.watchlist.hits) {
+        if (h.symbol && h.name) NAMES[h.symbol] = h.name;
+        if (h.symbol && Number(h.price) > 0) PRICES[h.symbol] = Number(h.price);
+      }
+    }
+  }
+
+  async function ensureLiveState(force = false) {
+    const now = Date.now();
+    if (!force && liveState && now - liveStateLoadedAt < 60000) {
+      return liveState;
+    }
+    if (!force && liveStatePromise) {
+      return liveStatePromise;
+    }
+    liveStatePromise = (async () => {
+      try {
+        const res = await origFetch(`./live_state.json?t=${now}`, { cache: "no-store" });
+        if (res && res.ok) {
+          const doc = await res.json();
+          if (doc && (doc.prices || doc.pipelines)) {
+            liveState = doc;
+            liveStateLoadedAt = Date.now();
+            hydratePricesFromLiveState();
+          }
+        }
+      } catch (e) {}
+      liveStatePromise = null;
+      return liveState;
+    })();
+    return liveStatePromise;
+  }
+
+  function getMergedStore(localStore) {
+    if (!liveState) return localStore;
+    const srvTrades = (liveState.trades_summary && Array.isArray(liveState.trades_summary.trades)) ? liveState.trades_summary.trades : [];
+    const seenIds = new Set(localStore.trades.map((t) => t.id));
+    const mergedTrades = [...localStore.trades];
+    for (const st of srvTrades) {
+      if (st.id && !seenIds.has(st.id)) {
+        mergedTrades.push(st);
+        seenIds.add(st.id);
+      }
+    }
+    // Use server cash/positions cleanly when user hasn't manually traded locally
+    const hasLocalTrades = localStore.trades.length > 0 || localStore.positions.length > 0;
+    const cash = hasLocalTrades ? localStore.cash : Number((liveState.portfolio && liveState.portfolio.cash !== undefined) ? liveState.portfolio.cash : localStore.cash);
+    const positions = hasLocalTrades ? localStore.positions : ((liveState.portfolio && Array.isArray(liveState.portfolio.positions)) ? liveState.portfolio.positions : localStore.positions);
+    return { ...localStore, cash, positions, trades: mergedTrades };
+  }
+
+  async function fetchLiveBrowserNews(sym) {
+    const now = Date.now();
+    const cached = LIVE_NEWS_CACHE.get(sym);
+    if (cached && now - cached.ts < 90000) return cached.items;
+    const items = [];
+    if (liveState && liveState.news && Array.isArray(liveState.news[sym])) {
+      for (const it of liveState.news[sym]) items.push(it);
+    }
+    try {
+      const rssUrl = encodeURIComponent(`https://news.google.com/rss/search?q=${sym}+stock&hl=en-US&gl=US&ceid=US:en`);
+      const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
+      const timer = ctrl ? setTimeout(() => ctrl.abort(), 3000) : null;
+      const resp = await origFetch(`https://api.rss2json.com/v1/api.json?rss_url=${rssUrl}`, ctrl ? { signal: ctrl.signal } : undefined);
+      if (timer) clearTimeout(timer);
+      if (resp && resp.ok) {
+        const data = await resp.json();
+        if (data && data.status === "ok" && Array.isArray(data.items)) {
+          for (const it of data.items.slice(0, 6)) {
+            const title = (it.title || "").trim();
+            if (title && !items.some((x) => x.title === title)) {
+              items.unshift({
+                title,
+                headline: title,
+                source: it.author || "Google News",
+                time: it.pubDate || new Date().toISOString(),
+                tags: ["live-rss", sym],
+                ticker: sym,
+                tickers: [sym],
+                link: it.link || `https://finance.yahoo.com/quote/${sym}/news`,
+              });
+            }
+          }
+        }
+      }
+    } catch (e) {}
+    const out = items.length > 0 ? items.slice(0, 8) : getLiveStockHeadlines(sym);
+    LIVE_NEWS_CACHE.set(sym, { ts: now, items: out });
+    return out;
   }
 
   function buildTradesSummary(store) {
@@ -448,14 +631,46 @@
     };
   }
 
-  function buildPipeline(symbol, usdAmount) {
+  function buildPipeline(symbol, usdAmount, effectiveStore = null) {
     const sym = (symbol || "TSLA").toUpperCase();
     const usd = Math.min(200, Math.max(1, Number(usdAmount || 25)));
+    const store = effectiveStore || loadStore();
+    const held = store.positions.find((p) => p.ticker === sym);
+
+    if (liveState && liveState.pipelines && liveState.pipelines[sym]) {
+      const livePip = JSON.parse(JSON.stringify(liveState.pipelines[sym]));
+      const plan = livePip.plan || {};
+      const entryP = Number(plan.entry || livePip.curr_price || PRICES[sym] || 100);
+      const stopP = Number(plan.stop || entryP * 0.98);
+      const targetP = Number(plan.target || entryP * 1.02);
+      const riskSh = Math.max(0.01, Math.round((entryP - stopP) * 100) / 100);
+      if (Math.abs(usd - 25) > 0.01) {
+        const tigerCustom = evaluateTigerPlan(sym, entryP, stopP, targetP, usd, 1.5, 0.05);
+        const econCustom = tigerCustom.economics;
+        livePip.sizing = {
+          ...(livePip.sizing || {}),
+          usd_amount: Math.round(tigerCustom.shares * entryP * 100) / 100,
+          shares: tigerCustom.shares,
+          cost: Math.round(tigerCustom.shares * entryP * 100) / 100,
+          max_loss: Math.round(tigerCustom.shares * riskSh * 100) / 100,
+          available_cash: store.cash,
+          is_fractional: tigerCustom.is_fractional,
+        };
+        livePip.tiger_economics = econCustom;
+      } else if (livePip.sizing) {
+        livePip.sizing.available_cash = store.cash;
+      }
+      livePip.is_held = Boolean(held);
+      livePip.shares_held = held ? held.shares : 0;
+      if (Array.isArray(liveState.approved_stocks)) {
+        livePip.approved_stocks = liveState.approved_stocks;
+      }
+      return livePip;
+    }
+
     const { px, orLow, orHigh, entry, stop, risk } = buildOrbGeometry(sym);
     const { rMult, target, tiger } = selectViableTarget(sym, entry, stop, risk, usd);
     const econ = tiger.economics;
-    const store = loadStore();
-    const held = store.positions.find((p) => p.ticker === sym);
     const effVerdict = held ? "HOLD" : (tiger.approved ? "BUY" : "HOLD");
     const newsInfo = getSimplifiedStockNews(sym, effVerdict, px, orHigh, orLow);
 
@@ -510,14 +725,28 @@
         { id: "trader-exit", name: "trader-exit", title: `Midpoint Stop & ${rMult}R Target`, status: "PASS", badge: `${rMult}.00:1 R:R`, badge_color: "jade", metric: `Stop $${stop.toFixed(2)} | ${rMult}R $${target.toFixed(2)}`, verdict: `${rMult}.00:1 REWARD:RISK`, details: `Selected ${rMult}R target so gross reward (+$${econ.gross_profit.toFixed(2)}) clears Tiger NZ round-trip fee ($${econ.round_trip_fee.toFixed(2)}).` },
         { id: "trader-budget", name: "trader-budget", title: "Tiger NZ Fractional Sizing", status: tiger.approved ? "PASS" : "BLOCKED", badge: `${tiger.shares.toFixed(4)} SH`, badge_color: tiger.approved ? "jade" : "crimson", metric: `RT Fee: $${econ.round_trip_fee.toFixed(2)} | Net: +$${econ.expected_net_profit.toFixed(2)} | BE: ${econ.breakeven_win_rate_pct.toFixed(1)}%`, verdict: tiger.approved ? "NET PROFITABLE" : "REJECTED", details: econ.reason },
       ],
-      approved_stocks: buildApprovedList(usd),
+      approved_stocks: (liveState && Array.isArray(liveState.approved_stocks) && liveState.approved_stocks.length > 0) ? liveState.approved_stocks : buildApprovedList(usd),
     };
   }
 
   function buildSnapshot(store) {
-    const { nzTimeStr } = nzNowStrings();
+    const clock = buildLiveMarketClock();
+    const realWatchlist = (liveState && liveState.watchlist && Array.isArray(liveState.watchlist.hits) && liveState.watchlist.hits.length > 0)
+      ? liveState.watchlist
+      : {
+          hits: Object.keys(PRICES).slice(0, 8).map((s) => ({
+            symbol: s,
+            name: NAMES[s] || s,
+            price: PRICES[s],
+            setups: ["orb"],
+            signal: "BUY",
+            signal_label: "BUY (2R/3R FRAC)",
+            signal_color: "jade",
+            approved: true,
+          })),
+        };
     return {
-      clock: { is_open: false, nz_time_str: nzTimeStr, next_open: "Opens 03:30 AM NZDT (GitHub Pages Demo)" },
+      clock,
       telemetry: {
         cash: store.cash,
         trades_today: store.trades.filter((t) => t.side === "BUY").length,
@@ -527,22 +756,11 @@
         open_positions_count: store.positions.length,
         paper_mode: true,
         auto_scan_enabled: store.autoScan,
-        universe_count: 5925,
+        universe_count: (liveState && liveState.universe_count) || 5925,
       },
       portfolio: { cash: store.cash, positions: store.positions },
-      prices: { prices: PRICES },
-      watchlist: {
-        hits: Object.keys(PRICES).slice(0, 8).map((s) => ({
-          symbol: s,
-          name: NAMES[s] || s,
-          price: PRICES[s],
-          setups: ["orb"],
-          signal: "BUY",
-          signal_label: "BUY (2R/3R FRAC)",
-          signal_color: "jade",
-          approved: true,
-        })),
-      },
+      prices: { prices: PRICES, detail: (liveState && liveState.prices && liveState.prices.detail) || {} },
+      watchlist: realWatchlist,
       alerts: { rules: [] },
       trades_summary: buildTradesSummary(store),
     };
@@ -550,6 +768,10 @@
 
   function buildChartCandles(symbol, tf) {
     const sym = (symbol || "TSLA").toUpperCase();
+    const tfKey = (tf || "1D").toUpperCase();
+    if (liveState && liveState.charts && liveState.charts[`${sym}_${tfKey}`] && Array.isArray(liveState.charts[`${sym}_${tfKey}`].candles) && liveState.charts[`${sym}_${tfKey}`].candles.length > 0) {
+      return { success: true, ...liveState.charts[`${sym}_${tfKey}`] };
+    }
     const { px, orLow, orHigh, entry, stop, risk } = buildOrbGeometry(sym);
     const { target } = selectViableTarget(sym, entry, stop, risk, 25);
     const prev = Math.round(px * 0.982 * 100) / 100;
@@ -585,24 +807,38 @@
     return new Response(JSON.stringify(obj), { status, headers: { "Content-Type": "application/json" } });
   }
 
-  const origFetch = window.fetch.bind(window);
   window.fetch = async function (input, init) {
     const urlStr = typeof input === "string" ? input : input.url;
     if (!urlStr || !urlStr.startsWith("/api/")) {
       return origFetch(input, init);
     }
+
+    // Optional live remote PocketServer bridge (configured in localStorage)
+    try {
+      const stationUrl = (localStorage.getItem(STATION_URL_KEY) || "").trim().replace(/\/+$/, "");
+      if (stationUrl) {
+        const remoteResp = await origFetch(`${stationUrl}${urlStr}`, init);
+        if (remoteResp && remoteResp.ok) return remoteResp;
+      }
+    } catch (e) {}
+
+    await ensureLiveState(urlStr.includes("force=true"));
     const url = new URL(urlStr, window.location.origin);
     const path = url.pathname;
-    const store = loadStore();
+    const rawStore = loadStore();
+    const store = getMergedStore(rawStore);
 
     if (path === "/api/state" || path === "/api/config") {
       return jsonResponse(buildSnapshot(store));
     }
     if (path === "/api/pipeline") {
-      return jsonResponse({ success: true, pipeline: buildPipeline(url.searchParams.get("symbol"), url.searchParams.get("usd")) });
+      return jsonResponse({ success: true, pipeline: buildPipeline(url.searchParams.get("symbol"), url.searchParams.get("usd"), store) });
     }
     if (path === "/api/pipeline/approved") {
-      return jsonResponse({ success: true, approved_stocks: buildApprovedList(25) });
+      const apprv = (liveState && Array.isArray(liveState.approved_stocks) && liveState.approved_stocks.length > 0)
+        ? liveState.approved_stocks
+        : buildApprovedList(25);
+      return jsonResponse({ success: true, approved_stocks: apprv });
     }
     if (path === "/api/chart/data") {
       return jsonResponse(buildChartCandles(url.searchParams.get("symbol"), url.searchParams.get("tf")));
@@ -610,17 +846,12 @@
     if (path === "/api/news") {
       const syms = (url.searchParams.get("symbols") || "TSLA").split(",").map((s) => s.trim().toUpperCase()).filter(Boolean);
       const primarySym = syms[0] || "TSLA";
-      const items = [];
-      for (const s of syms.slice(0, 3)) {
-        for (const it of getLiveStockHeadlines(s)) {
-          items.push(it);
-        }
-      }
+      const items = await fetchLiveBrowserNews(primarySym);
       return jsonResponse({
         success: true,
         data: {
           items,
-          moves: syms.slice(0, 3).map((s) => ({ ticker: s, price: PRICES[s] || 100, pct: 1.85, moving: false })),
+          moves: syms.slice(0, 3).map((s) => ({ ticker: s, price: PRICES[s] || 100, pct: PRICE_PCT[s] || 0.0, moving: false })),
         },
       });
     }
@@ -628,7 +859,16 @@
       return jsonResponse(buildTradesSummary(store));
     }
     if (path === "/api/scan") {
-      return jsonResponse({ success: true, watchlist: buildSnapshot(store).watchlist });
+      let body = {};
+      try { body = init && init.body ? JSON.parse(init.body) : {}; } catch (e) {}
+      const wl = buildSnapshot(store).watchlist;
+      let hits = Array.isArray(wl.hits) ? wl.hits : [];
+      if (body.symbols && String(body.symbols).toUpperCase() !== "ALL") {
+        const wanted = new Set(String(body.symbols).split(",").map((s) => s.trim().toUpperCase()).filter(Boolean));
+        const filtered = hits.filter((h) => wanted.has(h.symbol));
+        if (filtered.length > 0) hits = filtered;
+      }
+      return jsonResponse({ success: true, watchlist: { ...wl, hits } });
     }
     if (path === "/api/auto-scan") {
       const body = init && init.body ? JSON.parse(init.body) : {};
@@ -780,7 +1020,7 @@
         success: true,
         dispatched: true,
         recipient: "khanalnischal2075@gmail.com",
-        message: `Daily market close statement (with Tiger Brokers NZ PDF) compiled for khanalnischal2075@gmail.com! Click 'Download PDF Statement' anytime or run start.py for live Resend email delivery.`,
+        message: `Daily market close statement (with Tiger Brokers NZ PDF) compiled! Click 'Download PDF Statement' now, or configure RESEND_API_KEY in GitHub Secrets / run start.py for automated emails.`,
         data: buildReportDataPayload(store),
       });
     }
@@ -789,12 +1029,22 @@
 
   window.WebSocket = function () {
     const sock = { readyState: 1, close: function () {}, send: function () {} };
-    setTimeout(() => {
-      if (typeof sock.onopen === "function") sock.onopen({});
+    ensureLiveState().then(() => {
+      setTimeout(() => {
+        if (typeof sock.onopen === "function") sock.onopen({});
+        if (typeof sock.onmessage === "function") {
+          sock.onmessage({ data: JSON.stringify({ type: "init_state", state: buildSnapshot(getMergedStore(loadStore())) }) });
+        }
+      }, 30);
+    });
+    // Auto-refresh live state every 60s when open on GitHub Pages
+    const pollId = setInterval(async () => {
+      await ensureLiveState(true);
       if (typeof sock.onmessage === "function") {
-        sock.onmessage({ data: JSON.stringify({ type: "init_state", state: buildSnapshot(loadStore()) }) });
+        sock.onmessage({ data: JSON.stringify({ type: "init_state", state: buildSnapshot(getMergedStore(loadStore())) }) });
       }
-    }, 50);
+    }, 60000);
+    sock.close = function () { clearInterval(pollId); };
     return sock;
   };
 })();

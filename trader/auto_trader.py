@@ -145,8 +145,9 @@ class AutoTraderEngine:
 
         is_market_open = is_trading_day and (market_open_ny <= ny_minutes < market_close_ny)
         is_orb_trading_active = is_trading_day and (orb_complete_ny <= ny_minutes < entry_cutoff_ny)
-        is_flat_by_time = is_trading_day and (ny_minutes >= flat_by_ny and ny_minutes < market_close_ny)
-        is_close_reporting_time = is_trading_day and (flat_by_ny <= ny_minutes <= market_close_ny + 30)
+        # Active from flat_by (15:55 / 12:55 half-day) through end of NY day so scheduled cycles never miss flattening
+        is_flat_by_time = is_trading_day and (ny_minutes >= flat_by_ny)
+        is_close_reporting_time = is_trading_day and (ny_minutes >= flat_by_ny and ny_minutes <= market_close_ny + 90)
 
         return {
             "utc_now": utc_now,
@@ -204,13 +205,15 @@ class AutoTraderEngine:
             return None
 
         # Deduct cash and add position
+        m_times = self.get_market_times()
+        ny_date_iso = m_times["ny_dt"].date().isoformat()
         portfolio["cash"] = round(cash - total_cost, 2)
         existing_pos = next((p for p in portfolio.get("positions", []) if p.get("ticker") == symbol), None)
         if existing_pos:
             existing_pos["shares"] = round(float(existing_pos.get("shares", 0)) + shares, 4)
             existing_pos.setdefault("lots", []).append({
                 "id": f"{symbol}-{int(time.time())}",
-                "date": datetime.date.today().isoformat(),
+                "date": ny_date_iso,
                 "shares": shares,
                 "cost": total_cost,
                 "entry_price": entry_price,
@@ -224,7 +227,7 @@ class AutoTraderEngine:
                 "shares": shares,
                 "lots": [{
                     "id": f"{symbol}-{int(time.time())}",
-                    "date": datetime.date.today().isoformat(),
+                    "date": ny_date_iso,
                     "shares": shares,
                     "cost": total_cost,
                     "entry_price": entry_price,
@@ -245,7 +248,6 @@ class AutoTraderEngine:
 
         # Record in trade_history.json
         th_data = read_json_safe(HISTORY_FILE, {"trades": [], "starting_cash": self.initial_capital})
-        m_times = self.get_market_times()
         trade_id = f"TRD-{int(time.time())}"
         trade_entry = {
             "id": trade_id,
@@ -344,9 +346,10 @@ class AutoTraderEngine:
         return trade_entry
 
     def monitor_open_positions(self, is_flat_time: bool = False):
-        """Monitors open positions against live market price, stop loss, and take profit."""
+        """Monitors open positions against live market price, stop loss, take profit, and overnight flat rules."""
         portfolio = read_json_safe(PORTFOLIO_FILE, {"cash": self.initial_capital, "positions": []})
         positions = list(portfolio.get("positions", []))
+        ny_today_iso = self.get_market_times()["ny_dt"].date().isoformat()
 
         for pos in positions:
             sym = pos.get("ticker")
@@ -357,11 +360,12 @@ class AutoTraderEngine:
             current_price = resolve_real_market_price(sym)
             lots = pos.get("lots", [])
             lot = lots[0] if lots else {}
+            lot_date = str(lot.get("date") or ny_today_iso)
             stop_price = float(lot.get("stop_price", current_price * 0.98))
             target_price = float(lot.get("target_price", current_price * 1.02))
 
-            if is_flat_time:
-                # Mandatory 09:55 AM NZDT close!
+            if is_flat_time or lot_date < ny_today_iso:
+                # Mandatory 09:55 AM NZDT / 15:55 ET flat close — zero overnight hold!
                 self.execute_sell(sym, shares, current_price, "09:55 Flat-by-Close Rule")
             elif current_price >= target_price:
                 self.execute_sell(sym, shares, current_price, "Profit Target Reached")
@@ -424,18 +428,22 @@ class AutoTraderEngine:
             return None
 
         # 4. trader-timemachine: 60-day Monte Carlo check up to flat_by
+        flat_by_str = str((read_json_safe(CONFIG_FILE, {}) or {}).get("flat_by", "15:55"))
+        if m_times_now := self.get_market_times():
+            if m_times_now["ny_dt"].date().isoformat() in NYSE_EARLY_CLOSE:
+                flat_by_str = "12:55"
         try:
             subprocess.run(
-                [sys.executable, "trader-timemachine/timemachine.py", "run", "--until", "15:55", "--replays", "2000", "--seed", "19", "--write"],
+                [sys.executable, "trader-timemachine/timemachine.py", "run", "--until", flat_by_str, "--replays", "2000", "--seed", "19", "--write"],
                 cwd=str(REPO_DIR), capture_output=True, timeout=12
             )
         except Exception:
             pass
 
-        # 5. trader-budget + trader-risk: formal bracket sizing & risk check
+        # 5. trader-budget + trader-risk: formal fractional bracket sizing (respecting $25 target budget) & risk check
         try:
             b_proc = subprocess.run(
-                [sys.executable, "trader-budget/size.py", "--limit", "--write"],
+                [sys.executable, "trader-budget/size.py", "--limit", "--budget", str(round(min(200.0, usd_to_use * 4.0), 2)), "--write"],
                 cwd=str(REPO_DIR), capture_output=True, text=True, timeout=8
             )
             if b_proc.returncode != 0:
@@ -467,9 +475,10 @@ class AutoTraderEngine:
         m_times = self.get_market_times()
         today_nz = m_times["nz_date_str"]
 
-        # 1. Check Mandatory Flat-by-close (09:55 AM NZDT / 15:55 ET)
-        if m_times["is_flat_by_time"]:
-            self.monitor_open_positions(is_flat_time=True)
+        # 1. Check Mandatory Flat-by-close or stale prior-day positions
+        pf_check = read_json_safe(PORTFOLIO_FILE, {"positions": []}) or {"positions": []}
+        if pf_check.get("positions"):
+            self.monitor_open_positions(is_flat_time=m_times["is_flat_by_time"])
 
         # 2. Check Daily Market Close Email Report
         if m_times["is_close_reporting_time"] and self.last_email_date_sent != today_nz:
@@ -487,6 +496,31 @@ class AutoTraderEngine:
         # 3. If within active ORB trading window, monitor positions & scan US universe
         if m_times["is_orb_trading_active"] and self.auto_trading_enabled:
             self.monitor_open_positions(is_flat_time=False)
+
+            # Refresh ORB watchlist if stale (>180s) so standalone cron/GitHub Actions discovers live breakouts across US market
+            wl_stale = True
+            if WATCHLIST_FILE.is_file():
+                wl_age = time.time() - WATCHLIST_FILE.stat().st_mtime
+                if wl_age < 180.0:
+                    wl_stale = False
+            if wl_stale:
+                try:
+                    batch = self.next_universe_batch(300)
+                    if batch:
+                        prev_wl = read_json_safe(WATCHLIST_FILE, {}) or {}
+                        prev_hits = {h.get("symbol"): h for h in prev_wl.get("hits", []) if h.get("symbol")}
+                        subprocess.run(
+                            [sys.executable, "trader-scanner/scan.py", "orb", "--symbols", ",".join(batch)],
+                            cwd=str(REPO_DIR), capture_output=True, timeout=45
+                        )
+                        new_wl = read_json_safe(WATCHLIST_FILE, {}) or {}
+                        for h in new_wl.get("hits", []):
+                            if h.get("symbol"):
+                                prev_hits[h["symbol"]] = h
+                        new_wl["hits"] = list(prev_hits.values())
+                        write_json_safe(WATCHLIST_FILE, new_wl)
+                except Exception:
+                    pass
 
             portfolio = read_json_safe(PORTFOLIO_FILE, {"cash": self.initial_capital, "positions": []})
             current_positions = portfolio.get("positions", [])

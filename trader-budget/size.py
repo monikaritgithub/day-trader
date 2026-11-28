@@ -369,7 +369,8 @@ def size_trade(plan, cfg, budget=None, limit=None, price=None, cash=None, today=
         if use_fractional:
             if per_share <= 0 or usd <= 0:
                 return 0.0
-            return round(float(usd) / float(per_share), 4)
+            # Always floor fractional share quantity so qty * per_share never exceeds the USD cap
+            return math.floor((float(usd) / float(per_share)) * 10000 + EPS) / 10000.0
         return shares_for(usd, per_share)
 
     limits = []
